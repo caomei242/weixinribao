@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>微信反馈日报中心</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260519-daily-center-p0" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>微信反馈日报中心</h1>
+        <p id="statusLine">载入中...</p>
+      </div>
+      <div class="actions">
+        <button id="refreshStatusBtn">刷新状态</button>
+        <details class="more-actions">
+          <summary>更多</summary>
+          <div class="more-menu">
+            <button id="collectBtn">试读消息</button>
+            <button id="dailyControlBtn">日报诊断</button>
+            <button id="exportTemplateBtn">转述摘要</button>
+            <button id="configBtn">配置中心</button>
+            <button id="exportReportBtn" title="推荐使用转述摘要">旧版日报</button>
+            <button id="exportFollowupBtn" title="推荐使用转述摘要">旧版待办</button>
+          </div>
+        </details>
+      </div>
+    </header>
+
+    <div class="app-shell" id="appShell">
+      <nav class="inbox-v1-nav" id="inboxV1Nav">
+        <button data-page-target="daily">日报中心</button>
+        <button data-page-target="today">今日防漏</button>
+        <button data-page-target="candidates">候选收件箱</button>
+        <button data-page-target="messages">消息明细</button>
+        <button data-page-target="group-management">群管理</button>
+        <button data-page-target="people">我方人员</button>
+        <button data-page-target="config">配置中心</button>
+      </nav>
+
+      <main class="main-panel" id="mainPanel">
+        <section class="workspace-page daily-report-center active-page" id="dailyReportCenterPage" data-page="daily">
+          <header class="daily-center-head">
+            <div>
+              <p class="eyebrow">日报中心</p>
+              <h2>日报中心｜<span id="dailyCenterDate">载入中</span></h2>
+              <p id="dailyCenterLine">先看日报有没有生成、有没有沉淀，再处理今天的新发现和未跟进。</p>
+            </div>
+            <div class="daily-center-actions">
+              <button id="topGenerateDraftBtn">生成/刷新日报</button>
+              <button id="copyDailyReportBtn">复制全文</button>
+              <button id="exportDailyMarkdownBtn">导出 Markdown</button>
+            </div>
+          </header>
+
+          <div class="daily-center-cards" id="dailyCenterCards">
+            <article class="daily-center-card"><span>日报状态</span><b>载入中</b><small>正在读取本机草稿</small></article>
+            <article class="daily-center-card"><span>沉淀状态</span><b>载入中</b><small>等待人工确认</small></article>
+            <article class="daily-center-card"><span>监控群数</span><b>0</b><small>启用监控并纳入日报</small></article>
+            <article class="daily-center-card"><span>新发现问题</span><b>0</b><small>今天候选事项</small></article>
+            <article class="daily-center-card"><span>历史未跟进</span><b>0</b><small>仍需人工收口</small></article>
+          </div>
+
+          <div class="daily-report-layout">
+            <section class="daily-report-panel">
+              <div class="daily-report-head">
+                <div>
+                  <h3>日报全文</h3>
+                  <p id="dailyReportMetaLine">未加载</p>
+                </div>
+                <button id="dailyReportRegenerateInlineBtn">生成/刷新日报</button>
+              </div>
+              <div id="dailyReportEmpty" class="daily-report-empty">
+                <h3>还没有生成日报</h3>
+                <p>下一步：先点击“生成/刷新日报”，系统会按当前候选整理一版本机日报全文。</p>
+                <button id="dailyReportEmptyGenerateBtn">生成/刷新日报</button>
+              </div>
+              <pre id="dailyReportFullText" class="daily-report-text hidden"></pre>
+              <div class="daily-report-footer">
+                <button id="confirmDailySettlementBtn">确认沉淀</button>
+                <button id="markDailyReviewBtn">标记需要重看</button>
+                <p id="dailySettlementResult" class="safe-note"></p>
+              </div>
+            </section>
+
+            <aside class="daily-side-panel">
+              <section class="daily-side-card">
+                <div class="panel-head">
+                  <h3>日报沉淀中心</h3>
+                  <button id="refreshDailySettlementBtn">刷新</button>
+                </div>
+                <div id="dailySettlementRows" class="settlement-list"></div>
+              </section>
+              <details class="diagnostic-details daily-diagnostics">
+                <summary>诊断详情</summary>
+                <div id="dailyCenterDiagnostics">技术状态和旧流程说明会收在这里，不占首页主视觉。</div>
+              </details>
+            </aside>
+          </div>
+        </section>
+
+        <section class="inbox-v1-workspace workspace-page today-page" id="inboxV1Workspace" data-page="today">
+          <div class="inbox-v1-hero">
+            <div>
+              <p class="eyebrow">今日防漏</p>
+              <h2>试读 50 条 → 消息明细 → 发送人识别 → 候选事项 → 群 / 客户打标 → 人工确认 → 草稿日报 → 转述摘要</h2>
+              <p id="inboxV1Explain">50 条是原始消息，3 条是抽出来的候选事项；不是漏读，候选仍需人工确认。</p>
+            </div>
+            <div class="human-status-panel" id="inboxV1TopStatus">
+              <div id="humanStatusCards" class="inbox-v1-status">载入中...</div>
+              <details id="diagnosticDetails" class="diagnostic-details">
+                <summary>诊断详情</summary>
+                <div id="diagnosticDetailsBody">载入中...</div>
+              </details>
+            </div>
+          </div>
+          <div class="inbox-v1-body">
+            <div id="inboxV1Workflow" class="workflow-rail"></div>
+            <aside class="group-profile-panel" id="inboxV1GroupProfile">
+              <h3>群 / 客户打标</h3>
+              <p>载入中...</p>
+            </aside>
+          </div>
+          <div class="real-trial-summary today-trial-summary" id="realTrialSummary">
+            <div>
+              <h2>最近试读</h2>
+              <p id="realTrialLine">载入中...</p>
+            </div>
+            <small>50 条是原始消息，候选事项是系统从消息中抽取出的可处理事项。</small>
+          </div>
+          <p class="safe-note">不会自动写入正式日报；当前只做本地审阅、本地候选、本机草稿和转述摘要。</p>
+        </section>
+
+        <section class="inbox-main-grid workspace-page" id="inboxMainGrid" data-workspace-pages="messages candidates">
+          <section class="inbox-column messages-column" id="realTrialMessagesPanel" data-page="messages">
+            <header class="column-head">
+              <div>
+                <h2>消息明细</h2>
+                <p>最近 50 条原始消息，本地审阅谁在什么时间说了什么。</p>
+              </div>
+              <button id="refreshRealTrialMessagesBtn">刷新</button>
+            </header>
+            <div id="realTrialMessages" class="message-list"></div>
+            <p class="safe-note">真实原文只在本机 UI 展示，不写状态卡、日志或外发材料。</p>
+          </section>
+
+          <section class="inbox-column candidate-column" id="candidateInboxPanel" data-page="candidates">
+            <header class="column-head">
+              <div>
+                <h2>候选收件箱</h2>
+                <p id="candidatePoolLine">系统会优先展示当前最该处理的候选；成立与否由人工确认。</p>
+              </div>
+              <span id="itemCount">0</span>
+            </header>
+            <div class="candidate-toolbar">
+              <label>日期<input type="date" id="filterDate" /></label>
+              <label>状态
+                <select id="statusFilter">
+                  <option value="pending">待确认</option>
+                  <option value="">全部</option>
+                  <option value="confirmed">已确认</option>
+                  <option value="rejected">已驳回</option>
+                </select>
+              </label>
+              <label class="toggle"><input type="checkbox" id="riskOnly" /> 只看风险项</label>
+            </div>
+            <div class="chips">
+              <button data-type="requirement">需求</button>
+              <button data-type="bug">Bug</button>
+              <button data-type="consultation">咨询</button>
+              <button data-type="conclusion">结论</button>
+              <button data-type="followup">待跟进</button>
+            </div>
+            <div id="items"></div>
+            <div id="candidateActionBar" class="candidate-action-bar">
+              <button data-candidate-action="confirm">确认</button>
+              <button data-candidate-action="reject">驳回</button>
+              <button data-candidate-action="change-type">改类型</button>
+              <button data-candidate-action="note">补充说明</button>
+              <button data-candidate-action="undo">撤销</button>
+            </div>
+            <div class="row-actions sticky-actions">
+              <button id="importRealTrialBtn">把本次试读候选加入待确认</button>
+              <button id="realTrialExportTemplateBtn">用最近真实试读生成转述摘要</button>
+            </div>
+            <p id="importRealTrialResult" class="safe-note"></p>
+          </section>
+
+          <aside class="inbox-column inspector-column" id="inboxInspectorPanel">
+            <section class="detail">
+              <div class="detail-section-head">
+                <h2>候选详情与人工确认</h2>
+                <p class="section-note">先看这条候选的摘要、风险和确认动作，再决定是否继续同步。</p>
+              </div>
+              <div id="detailEmpty" class="empty">当前筛选无待确认事项</div>
+              <form id="reviewForm" class="hidden">
+                <div class="detail-meta" id="detailMeta"></div>
+                <div>
+                  <h3>原文证据</h3>
+                  <blockquote id="evidence"></blockquote>
+                </div>
+                <label>状态
+                  <select id="reviewStatus">
+                    <option value="pending">待确认</option>
+                    <option value="confirmed">成立</option>
+                    <option value="rejected">驳回</option>
+                  </select>
+                </label>
+                <label>负责人<input id="ownerName" /></label>
+                <label>优先级
+                  <select id="priority">
+                    <option>P0</option>
+                    <option>P1</option>
+                    <option selected>P2</option>
+                    <option>P3</option>
+                  </select>
+                </label>
+                <label>下游
+                  <select id="downstream">
+                    <option value="product">产品处理</option>
+                    <option value="tech">技术处理</option>
+                    <option value="ops">运营处理</option>
+                    <option value="none">暂不同步</option>
+                  </select>
+                </label>
+                <label>备注<textarea id="note" rows="4"></textarea></label>
+                <div class="form-actions">
+                  <button type="submit">保存确认</button>
+                  <button type="button" id="cancelBtn">取消修改</button>
+                </div>
+              </form>
+            </section>
+
+            <section class="inspector-block source-chain-block">
+              <div class="inspector-section-head">
+                <h3>候选来源消息</h3>
+                <p class="section-note">按时间回看触发这条候选的消息片段，方便快速核对上下文。</p>
+              </div>
+              <div id="realTrialSourceMessages" class="message-list compact"></div>
+            </section>
+
+            <section class="inspector-block" id="senderReviewPanel">
+              <h3>发送人识别</h3>
+              <p class="section-note">这一块只看谁在说话、身份怎么判定，和上面的来源消息分开处理。</p>
+              <div id="senderReviewList" class="sender-list"></div>
+              <label>人工身份
+                <select id="senderRoleSelect">
+                  <option value="unknown">未知</option>
+                  <option value="internal">我方</option>
+                  <option value="customer">客户方</option>
+                  <option value="channel">渠道方</option>
+                </select>
+              </label>
+              <label>人员 / 备注名<input id="senderPersonName" placeholder="本地人工映射" /></label>
+              <button id="saveSenderMappingBtn">保存发送人映射</button>
+              <p id="senderMappingResult" class="safe-note"></p>
+            </section>
+
+            <section class="inspector-block runtime-group-profile" id="runtimeGroupProfile">
+              <h3>群档案</h3>
+              <dl id="runtimeGroupProfileBody" class="profile-list">
+                <div><dt>客户名称</dt><dd>载入中...</dd></div>
+                <div><dt>群负责人</dt><dd>载入中...</dd></div>
+                <div><dt>业务模块</dt><dd>载入中...</dd></div>
+                <div><dt>客户阶段</dt><dd>载入中...</dd></div>
+                <div><dt>群类型</dt><dd>载入中...</dd></div>
+                <div><dt>常用联系人</dt><dd>载入中...</dd></div>
+                <div><dt>回复注意事项</dt><dd>载入中...</dd></div>
+              </dl>
+            </section>
+          </aside>
+        </section>
+
+        <section class="workspace-page group-management-page" id="groupManagementPage" data-page="group-management">
+          <header class="panel-head group-management-head">
+            <div>
+              <h2>群管理</h2>
+              <p class="safe-note">这里维护监控群档案；新增、编辑和停用只影响本机配置，不会自动读取或外发。</p>
+            </div>
+            <button id="addMonitorGroupBtn">新增监控群</button>
+          </header>
+          <div class="group-management-layout">
+            <aside class="monitor-group-list-panel">
+              <label>搜索监控群<input id="monitorGroupSearch" placeholder="输入客户、群名或负责人" /></label>
+              <div id="monitorGroupList" class="monitor-group-list"></div>
+            </aside>
+            <section class="monitor-group-editor">
+              <div class="monitor-group-editor-head">
+                <div>
+                  <h3 id="monitorGroupEditorTitle">监控群档案</h3>
+                  <p id="monitorGroupEditorStatus" class="safe-note">左侧选择一个监控群，或新增后保存。</p>
+                </div>
+                <span id="monitorGroupCompleteness" class="status-tag">待完善</span>
+              </div>
+              <div class="group-form-grid">
+                <label class="wide">监控群名称<input id="monitorGroupDisplayName" /></label>
+                <label>客户名称<select id="monitorGroupCustomer"></select></label>
+                <label>群类型<select id="monitorGroupType"></select></label>
+                <label>业务模块<select id="monitorGroupModule"></select></label>
+                <label>客户阶段<select id="monitorGroupStage"></select></label>
+                <label>群负责人<select id="monitorGroupOwner"></select></label>
+                <label>常用联系人<select id="monitorGroupContacts" multiple></select></label>
+                <label>我方人员<select id="monitorGroupInternalPeople" multiple></select></label>
+                <label>试读范围<select id="monitorGroupTrialRange"></select></label>
+                <label class="toggle"><input type="checkbox" id="monitorGroupDailyMonitor" /> 是否每日监控</label>
+                <label class="toggle"><input type="checkbox" id="monitorGroupIncludeDaily" /> 是否纳入日报</label>
+                <label>验证状态<select id="monitorGroupVerifyStatus"></select></label>
+                <label class="wide">回复注意事项<textarea id="monitorGroupReplyNotes" rows="4"></textarea></label>
+              </div>
+              <div class="form-actions">
+                <button id="saveMonitorGroupBtn">保存群档案</button>
+                <button id="disableMonitorGroupBtn" type="button">停用监控</button>
+                <button id="trialMonitorGroupBtn" type="button" disabled>试读本群</button>
+              </div>
+              <p id="monitorGroupSaveResult" class="safe-note"></p>
+            </section>
+          </div>
+        </section>
+
+        <section class="workspace-page people-page" id="peoplePage" data-page="people">
+          <header class="panel-head">
+            <div>
+              <h2>我方人员</h2>
+              <p class="safe-note">用于群负责人和发送人识别，只保存本机配置。</p>
+            </div>
+            <button id="addPeoplePagePersonBtn">新增人员</button>
+          </header>
+          <div id="peoplePageRows" class="editor-list"></div>
+          <div class="form-actions people-actions">
+            <button id="savePeoplePageBtn">保存人员</button>
+            <p id="peoplePageResult" class="safe-note"></p>
+          </div>
+        </section>
+
+        <section class="daily-control workspace-page" id="dailyControlDashboard" data-page="draft">
+          <header class="daily-head">
+            <div>
+              <h2>草稿日报</h2>
+              <p id="dailyTopLine">载入中...</p>
+            </div>
+            <div class="daily-actions">
+              <button id="dailyCollectBtn">立即采集</button>
+              <button id="dailyDraftReportBtn">生成待审日报</button>
+              <button id="generateDraftBtn">生成待沉淀草稿</button>
+              <button id="writeFormalBtn" disabled>写入正式日报</button>
+            </div>
+          </header>
+
+      <div id="dailyCards" class="daily-cards"></div>
+
+      <section class="daily-panel daily-real-trial-panel" id="dailyRealTrialPanel">
+        <div class="panel-head">
+          <h3>最近真实试读</h3>
+          <button id="dailyViewRealTrialBtn">查看最近真实试读候选</button>
+          <button id="dailyImportRealTrialBtn">加入待确认</button>
+          <button id="dailyExportRealTrialBtn">用最近真实试读生成转述摘要</button>
+        </div>
+        <p id="dailyRealTrialLine">载入中...</p>
+        <div id="dailyRealTrialNotice" class="safe-note"></div>
+        <div id="dailyRealTrialItems" class="trial-item-list"></div>
+      </section>
+
+      <div class="daily-grid">
+        <section class="daily-panel pending-panel">
+          <h3>今日待确认事项</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>编号</th>
+                  <th>客户 / 渠道</th>
+                  <th>类型</th>
+                  <th>摘要</th>
+                  <th>风险</th>
+                  <th>负责人</th>
+                  <th>动作</th>
+                </tr>
+              </thead>
+              <tbody id="dailyPendingRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="daily-panel settlement-panel">
+          <h3>正式沉淀检查</h3>
+          <div id="settlementChecklist" class="checklist"></div>
+          <p class="safe-note">正式路径未配置时，正式日报保持关闭；本页只生成本机待整理草稿。</p>
+        </section>
+
+        <section class="daily-panel" id="draftReportPanel">
+          <div class="panel-head">
+            <h3>草稿日报 / 机器初稿</h3>
+            <div class="row-actions">
+              <label>草稿数据源
+                <select id="draftDataSourceChoice">
+                  <option value="">自动跟随当前候选</option>
+                  <option value="real_trial">优先使用最近试读候选</option>
+                  <option value="workspace">只看今天处理区</option>
+                </select>
+              </label>
+              <button id="refreshDraftReportBtn">刷新预览</button>
+              <button id="regenerateDraftReportBtn">重新生成草稿</button>
+            </div>
+          </div>
+          <div id="trialDraftPrompt" class="safe-note"></div>
+          <p id="draftReportMeta" class="safe-note">机器初稿待载入。</p>
+          <div id="draftReportLinks" class="trial-item-list"></div>
+          <pre id="draftReportPreview">载入中...</pre>
+          <p class="safe-note">这是本机机器初稿，需人工审阅；不能直接外发，也不会自动写入正式日报。</p>
+        </section>
+
+        <section class="daily-panel">
+          <h3>每日运行时间线</h3>
+          <div id="dailyTimeline" class="timeline"></div>
+        </section>
+
+        <section class="daily-panel">
+          <h3>候选质量反馈</h3>
+          <div id="qualityFeedbackPanel" class="quality-summary"></div>
+          <label>反馈类型
+            <select id="qualityFeedbackType">
+              <option value="false_positive">误提</option>
+              <option value="missed">漏提补录</option>
+              <option value="type_correction">类型修正</option>
+              <option value="risk_correction">风险修正</option>
+            </select>
+          </label>
+          <label>反馈备注<textarea id="qualityFeedbackNote" rows="3"></textarea></label>
+          <button id="saveQualityFeedbackBtn">保存规则反馈</button>
+          <p id="qualityFeedbackResult"></p>
+        </section>
+      </div>
+
+      <p class="daily-footer-note">写入正式日报 / 正式待办前必须人工二次确认；本页不外发客户原文。</p>
+    </section>
+
+    <section id="configCenterDialog" class="workspace-page config-center" data-page="config">
+      <div id="configCenterPage" class="config-shell">
+        <header class="config-top">
+          <div>
+            <h2>配置中心</h2>
+            <p id="configCenterStatus">载入中...</p>
+          </div>
+          <div class="config-actions">
+            <button id="configBackBtn">返回工作台</button>
+            <button id="testWxCliBtn">测试连接</button>
+            <button id="startTrialBtn">试读</button>
+            <button id="saveConfigBtn">保存配置</button>
+          </div>
+        </header>
+
+        <div class="config-body">
+          <nav id="configCenterNav" class="config-nav">
+            <button data-panel="trial" class="active">试读结果</button>
+            <button data-panel="sessions">采集会话</button>
+            <button data-panel="group-tags">监控群配置</button>
+            <button data-panel="people">我方人员</button>
+            <button data-panel="safety">安全设置</button>
+            <button data-panel="risk">风险词</button>
+          </nav>
+
+          <section class="config-main">
+            <div class="config-panel" data-panel-view="trial">
+              <p class="safe-note">安全提示：保存配置不会自动采集真实微信；试读前必须确认范围和禁止项。</p>
+              <div class="trial-controls">
+                <button data-trial-preset="2h">最近2小时</button>
+                <button data-trial-preset="today">今天</button>
+                <button data-trial-preset="recent50">最近50条</button>
+                <label>起始日期时间<input id="trialStartInput" type="datetime-local" /></label>
+                <label>结束日期时间<input id="trialEndInput" type="datetime-local" /></label>
+                <label>最近条数<input id="trialLimitInput" type="number" min="1" max="50" value="50" /></label>
+                <label>回看小时<input id="trialLookbackInput" type="number" min="1" max="2" value="2" /></label>
+              </div>
+              <div id="configTrialCards" class="metric-grid"></div>
+              <div id="trialRunResult" class="safe-note"></div>
+            </div>
+
+            <div class="config-panel hidden" data-panel-view="sessions">
+              <div class="panel-head">
+                <h3>试读范围</h3>
+                <button id="addSessionBtn">新增会话</button>
+              </div>
+              <div id="sessionRows" class="editor-list"></div>
+            </div>
+
+            <div class="config-panel hidden" data-panel-view="group-tags">
+              <div class="panel-head">
+                <h3>监控群字段</h3>
+              </div>
+              <p class="safe-note">这些字段只保存在本地配置，用于防漏收件箱、人工确认和本地转述摘要。</p>
+              <div id="groupTagRows" class="editor-list"></div>
+            </div>
+
+            <div class="config-panel hidden" data-panel-view="people">
+              <div class="panel-head">
+                <h3>我方人员</h3>
+                <button id="addPersonBtn">新增人员</button>
+              </div>
+              <div id="personRows" class="editor-list"></div>
+            </div>
+
+            <div class="config-panel hidden" data-panel-view="safety">
+              <h3>安全设置</h3>
+              <div id="safetySummary" class="safe-note"></div>
+            </div>
+
+            <div class="config-panel hidden" data-panel-view="risk">
+              <h3>风险词</h3>
+              <label>风险关键词<textarea id="riskKeywords" rows="7"></textarea></label>
+              <label>敏感关键词<textarea id="sensitiveKeywords" rows="5"></textarea></label>
+            </div>
+          </section>
+
+          <aside class="config-help">
+            <h3>说明 / 保存</h3>
+            <p>加入白名单才会进入试读范围；启用白名单必须唯一才能试读。</p>
+            <p>我方人员用于识别发送方；风险词只影响本地候选标记。</p>
+            <p>保存配置不会开启真实读取，也不会自动采集。</p>
+            <p id="configSaveResult"></p>
+            <p id="wxCliTestResult"></p>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="exportTemplateDialog" class="workspace-page export-template-center" data-page="transfer">
+      <div id="transferSummaryPage" class="export-template-shell">
+        <header class="export-template-top">
+          <div>
+            <h2>转述摘要</h2>
+            <p id="exportTemplateStatus">默认展示可直接复制的人话摘要；不会自动写入正式日报或正式待办。</p>
+          </div>
+          <div class="config-actions">
+            <button id="closeExportTemplateBtn">返回候选</button>
+            <button id="refreshExportPreviewBtn">刷新摘要</button>
+            <button id="exportSelectedTemplateBtn">生成本机文件</button>
+            <button id="exportAllTemplatesBtn">生成全部文件</button>
+          </div>
+        </header>
+
+        <div class="export-template-body">
+          <nav class="config-nav" id="exportTemplateNav">
+            <button class="active">转述摘要</button>
+            <button>任务说明</button>
+            <button>高级设置</button>
+            <button>预览</button>
+          </nav>
+
+          <section class="export-template-main">
+            <div class="transfer-task-header">
+              <div>
+                <h3>你要发给谁？</h3>
+                <p id="transferTaskLead">默认展示一段可直接复制的人话摘要，跟着当前最该处理的候选走。</p>
+              </div>
+              <p id="transferTaskMeta" class="safe-note">候选 0 条</p>
+            </div>
+
+            <div class="transfer-task-grid" id="transferTaskGrid">
+              <button class="transfer-task-card active" data-transfer-task="internal_sync">
+                <strong>给内部产品或技术同步</strong>
+                <span>保留问题、影响范围和待确认点，适合发给产品或技术同事。</span>
+              </button>
+              <button class="transfer-task-card" data-transfer-task="client_reply">
+                <strong>给客户回复</strong>
+                <span>整理一段更克制的回复草稿，避免把内部诊断信息带出去。</span>
+              </button>
+              <button class="transfer-task-card" data-transfer-task="self_recap">
+                <strong>给自己留今日复盘</strong>
+                <span>回看今天收到了什么、哪些还没处理、下一步该追谁。</span>
+              </button>
+            </div>
+
+            <details class="advanced-settings">
+              <summary>高级设置与本机文件</summary>
+              <div class="template-grid" id="templateSelect">
+                <label class="template-card">
+                  <input type="checkbox" name="exportTemplate" value="daily_review" checked />
+                  <strong>今日复盘稿</strong>
+                  <span>适合自己回看今天收到了什么、哪些还要继续跟。</span>
+                </label>
+                <label class="template-card">
+                  <input type="checkbox" name="exportTemplate" value="followup_checklist" checked />
+                  <strong>待跟进动作清单</strong>
+                  <span>适合整理负责人、优先级、是否要继续跟进。</span>
+                </label>
+                <label class="template-card">
+                  <input type="checkbox" name="exportTemplate" value="product_tech_summary" />
+                  <strong>内部同步稿</strong>
+                  <span>更适合给产品或技术做脱敏同步，减少内部字段暴露。</span>
+                </label>
+              </div>
+
+              <div class="export-settings">
+                <label>摘要数据
+                  <select id="exportDataSource">
+                    <option value="workspace">今天处理区</option>
+                    <option value="real_trial">最近试读候选</option>
+                  </select>
+                </label>
+                <label>摘要日期<input type="date" id="exportTemplateDate" /></label>
+                <label class="toggle"><input type="checkbox" id="exportConfirmedOnly" /> 只看已确认</label>
+                <label class="toggle"><input type="checkbox" id="exportIncludePending" checked /> 包含待确认</label>
+                <label class="toggle"><input type="checkbox" id="exportSeparateRisks" checked /> 风险单独提醒</label>
+              </div>
+            </details>
+
+            <div class="safe-note export-boundary">
+              这里只生成本机摘要和本机文件。不会自动写入正式日报、正式待办，也不会带出真实原文、wxid、key、salt、真实 DB 路径或 daemon 日志。
+            </div>
+
+            <div class="preview-head">
+              <h3>可直接复制的摘要</h3>
+              <span id="exportFilenamePreview">本机文件名：载入中...</span>
+            </div>
+            <pre id="exportTemplatePreview">载入中...</pre>
+            <p id="exportTemplateResult"></p>
+          </section>
+
+          <aside class="config-help">
+            <h3>使用提醒</h3>
+            <p>优先先看当前最该处理的候选，再决定发给谁。</p>
+            <p>这里的摘要只写本机文件，不会自动写正式日报、正式待办或外部系统。</p>
+            <p>复制前再看一眼风险提醒，避免把还没确认的信息直接发出去。</p>
+          </aside>
+        </div>
+      </div>
+    </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js?v=20260519-daily-center-p0"></script>
+  </body>
+</html>

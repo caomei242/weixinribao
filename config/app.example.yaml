@@ -1,0 +1,122 @@
+app:
+  host: "127.0.0.1"
+  port: 8765
+
+database:
+  path: "data/wechat_feedback.sqlite3"
+
+wx_cli:
+  mode: "fixture"
+  binary: "wx"
+  timeout_seconds: 15
+  fixture_dir: "fixtures"
+  real_read_enabled: false
+  real_allowed_session: "襄城县大斌网络科技有限公司X稿定"
+  real_lookback_hours: 2
+  real_limit: 50
+  real_start_at: ""
+  real_end_at: ""
+
+collector:
+  interval_minutes: 60
+  lookback_minutes: 120
+
+export:
+  directory: "exports"
+
+sessions:
+  - external_id: "customer-a"
+    display_name: "客户A项目群"
+    customer_name: "客户A"
+    channel_name: ""
+    module_name: "订单"
+    owner_name: "张三"
+    customer_stage: "试用期"
+    group_type: "客户项目群"
+    common_contacts: ["客户A对接人"]
+    reply_notes: "先确认订单信息再对外回复"
+    is_whitelisted: true
+    enabled: true
+    verification_status: "verified"
+    daily_monitor_enabled: true
+    include_in_daily: true
+    trial_scope: "最近50条"
+    internal_people: ["张三"]
+  - external_id: "customer-b"
+    display_name: "客户B售后群"
+    customer_name: "客户B"
+    channel_name: ""
+    module_name: "登录"
+    owner_name: "李四"
+    customer_stage: "交付期"
+    group_type: "售后群"
+    common_contacts: ["客户B对接人"]
+    reply_notes: "问题类先归因再回复"
+    is_whitelisted: true
+    enabled: true
+    verification_status: "verified"
+    daily_monitor_enabled: true
+    include_in_daily: true
+    trial_scope: "最近50条"
+    internal_people: ["李四"]
+  - external_id: "channel-c"
+    display_name: "渠道C协作群"
+    customer_name: ""
+    channel_name: "渠道C"
+    module_name: "渠道"
+    owner_name: "王五"
+    customer_stage: "合作期"
+    group_type: "渠道协作群"
+    common_contacts: ["渠道C对接人"]
+    reply_notes: "涉及商务口径先内部确认"
+    is_whitelisted: true
+    enabled: true
+    verification_status: "verified"
+    daily_monitor_enabled: true
+    include_in_daily: true
+    trial_scope: "最近50条"
+    internal_people: ["王五"]
+  - external_id: "襄城县大斌网络科技有限公司X稿定"
+    display_name: "襄城县大斌网络科技有限公司X稿定"
+    customer_name: "襄城县大斌网络科技有限公司"
+    channel_name: ""
+    module_name: "试点"
+    owner_name: ""
+    customer_stage: "试读验证"
+    group_type: "客户项目群"
+    common_contacts: []
+    reply_notes: ""
+    is_whitelisted: true
+    enabled: true
+    verification_status: "verified"
+    daily_monitor_enabled: true
+    include_in_daily: true
+    trial_scope: "最近50条"
+    internal_people: []
+  - external_id: "local-monitor-qiajie-gaoding"
+    display_name: "洽姐x稿定电商"
+    customer_name: ""
+    channel_name: ""
+    module_name: "电商设计"
+    owner_name: ""
+    customer_stage: "试读验证"
+    group_type: "测试群"
+    common_contacts: []
+    reply_notes: ""
+    is_whitelisted: true
+    enabled: true
+    verification_status: "pending_verification"
+    daily_monitor_enabled: true
+    include_in_daily: false
+    trial_scope: "最近50条"
+    internal_people: []
+
+internal_people:
+  - person_name: "张三"
+    aliases: ["张三", "Jason"]
+  - person_name: "李四"
+    aliases: ["李四", "Lisi"]
+
+risk:
+  keywords: ["报价", "合同", "金额", "投诉", "赔偿", "退款", "回复"]
+  sensitive_keywords: ["身份证", "手机号", "隐私"]

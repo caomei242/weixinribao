@@ -1,0 +1,100 @@
+{
+  "messages": [
+    {
+      "session_external_id": "customer-a",
+      "session_name": "客户A项目群",
+      "message_external_id": "a-001",
+      "local_id": "1001",
+      "sender_display_name": "客户A-运营",
+      "sender_raw_id": "wxid_customer_a_ops",
+      "sender_role": "customer",
+      "sent_at": "2026-05-15T09:00:00+08:00",
+      "message_type": "text",
+      "content_text": "能不能在订单列表直接看到预计发货时间？"
+    },
+    {
+      "session_external_id": "customer-a",
+      "session_name": "客户A项目群",
+      "message_external_id": "a-001",
+      "local_id": "1001",
+      "sender_display_name": "客户A-运营",
+      "sender_raw_id": "wxid_customer_a_ops",
+      "sender_role": "customer",
+      "sent_at": "2026-05-15T09:00:00+08:00",
+      "message_type": "text",
+      "content_text": "能不能在订单列表直接看到预计发货时间？"
+    },
+    {
+      "session_external_id": "customer-b",
+      "session_name": "客户B售后群",
+      "message_external_id": "b-001",
+      "local_id": "2001",
+      "sender_display_name": "客户B-小赵",
+      "sender_raw_id": "wxid_customer_b_zhao",
+      "sender_role": "customer",
+      "sent_at": "2026-05-15T09:30:00+08:00",
+      "message_type": "text",
+      "content_text": "今天登录一直转圈，换了浏览器也不行"
+    },
+    {
+      "session_external_id": "customer-a",
+      "session_name": "客户A项目群",
+      "message_external_id": "a-002",
+      "local_id": "1002",
+      "sender_display_name": "张三",
+      "sender_raw_id": "wxid_internal_zhangsan",
+      "sender_role": "internal",
+      "sent_at": "2026-05-15T09:45:00+08:00",
+      "message_type": "text",
+      "content_text": "已收到，我先确认一下订单字段口径"
+    },
+    {
+      "session_external_id": "channel-c",
+      "session_name": "渠道C协作群",
+      "message_external_id": "c-001",
+      "local_id": "3001",
+      "sender_display_name": "渠道C-阿明",
+      "sender_raw_id": "wxid_channel_c_ming",
+      "sender_role": "channel",
+      "sent_at": "2026-05-15T10:00:00+08:00",
+      "message_type": "text",
+      "content_text": "明天需要我方给客户一个回复"
+    },
+    {
+      "session_external_id": "customer-b",
+      "session_name": "客户B售后群",
+      "message_external_id": "b-002",
+      "local_id": "2002",
+      "sender_display_name": "客户B-财务",
+      "sender_raw_id": "wxid_customer_b_finance",
+      "sender_role": "customer",
+      "sent_at": "2026-05-15T10:30:00+08:00",
+      "message_type": "text",
+      "content_text": "这个报价和合同金额需要明天回复客户"
+    },
+    {
+      "session_external_id": "customer-a",
+      "session_name": "客户A项目群",
+      "message_external_id": "a-003",
+      "local_id": "1003",
+      "sender_display_name": "神秘用户",
+      "sender_raw_id": "wxid_unknown_guest",
+      "sender_role": "unknown",
+      "sent_at": "2026-05-15T11:00:00+08:00",
+      "message_type": "text",
+      "content_text": "想咨询一下订单状态在哪里看？手机号 13800000000 能否别放进日报结论"
+    },
+    {
+      "session_external_id": "outside-x",
+      "session_name": "白名单外测试群",
+      "message_external_id": "x-001",
+      "local_id": "9001",
+      "sender_display_name": "外部人员",
+      "sender_raw_id": "wxid_outside",
+      "sender_role": "unknown",
+      "sent_at": "2026-05-15T12:00:00+08:00",
+      "message_type": "text",
+      "content_text": "白名单外消息不应该进入日报"
+    }
+  ]
+}

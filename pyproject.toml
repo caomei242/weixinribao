@@ -1,0 +1,19 @@
+[project]
+name = "wechat-feedback-app"
+version = "0.1.0"
+description = "Fixture-first local WeChat feedback collection workbench."
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
