@@ -1983,6 +1983,254 @@ def write_machine_draft(
     return file_path
 
 
+def monitor_groups_payload(config: AppConfig) -> dict[str, Any]:
+    groups = [monitor_group_public_payload(session) for session in config.sessions]
+    return {
+        "status": "ok",
+        "title": "监控群",
+        "count": len(groups),
+        "daily_center_count": len(
+            [group for group in groups if group["counts_in_daily_center"]]
+        ),
+        "groups": groups,
+        "actions": {
+            "create": {"label": "新增监控群", "enabled": True},
+            "edit": {"label": "保存群档案", "enabled": True},
+            "disable": {"label": "停用监控", "enabled": True},
+        },
+        "safety": {
+            "save_triggers_collection": False,
+            "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+        },
+    }
+
+
+def monitor_group_detail_payload(config: AppConfig, group_id: str) -> dict[str, Any]:
+    session = find_monitor_group(config, group_id)
+    if session is None:
+        return {"status": "not_found", "group": {}}
+    return {
+        "status": "ok",
+        "group": monitor_group_public_payload(session, detail=True),
+        "field_options": monitor_group_field_options(config),
+        "safety": {
+            "save_triggers_collection": False,
+            "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+        },
+    }
+
+
+def save_monitor_group_payload(
+    config: AppConfig, payload: dict[str, Any], group_id: str | None = None
+) -> dict[str, Any]:
+    session = find_monitor_group(config, group_id) if group_id else None
+    if group_id and session is None:
+        return {"status": "not_found", "group": {}}
+    group_name = clean_text(payload.get("group_name")) or clean_text(
+        payload.get("display_name")
+    )
+    if not group_name:
+        return {
+            "status": "blocked",
+            "error_code": "monitor_group_name_required",
+            "group": {},
+        }
+    if session is None:
+        session = find_monitor_group_by_name(config, group_name)
+    if session is None:
+        session = SessionConfig(
+            external_id=local_monitor_external_id(group_name),
+            display_name=group_name,
+        )
+        config.sessions.append(session)
+
+    session.display_name = group_name
+    session.customer_name = clean_text(payload.get("customer_name"))
+    session.channel_name = clean_text(payload.get("channel_name"))
+    session.module_name = clean_text(payload.get("module_name"))
+    session.owner_name = clean_text(payload.get("owner_name"))
+    session.customer_stage = clean_text(payload.get("customer_stage"))
+    session.group_type = clean_text(payload.get("group_type")) or "测试群"
+    session.common_contacts = clean_text_list(payload.get("common_contacts"))
+    session.reply_notes = clean_text(payload.get("reply_notes"))
+    session.enabled = parse_bool(payload.get("enabled"), True)
+    session.is_whitelisted = True
+    session.verification_status = safe_verification_status(
+        payload.get("verification_status")
+    )
+    session.daily_monitor_enabled = parse_bool(
+        payload.get("daily_monitor_enabled"), True
+    )
+    session.include_in_daily = parse_bool(payload.get("include_in_daily"), False)
+    session.trial_scope = clean_text(payload.get("trial_scope")) or "最近50条"
+    session.internal_people = clean_text_list(payload.get("internal_people"))
+    config.wx_cli.real_read_enabled = False
+    write_config_center_yaml(config)
+    return {
+        "status": "saved",
+        "group": monitor_group_public_payload(session, detail=True),
+        "real_read_enabled": False,
+        "save_triggers_collection": False,
+    }
+
+
+def disable_monitor_group_payload(config: AppConfig, group_id: str) -> dict[str, Any]:
+    session = find_monitor_group(config, group_id)
+    if session is None:
+        return {"status": "not_found", "group": {}}
+    session.enabled = False
+    session.daily_monitor_enabled = False
+    config.wx_cli.real_read_enabled = False
+    write_config_center_yaml(config)
+    return {
+        "status": "disabled",
+        "group": monitor_group_public_payload(session, detail=True),
+        "real_read_enabled": False,
+        "save_triggers_collection": False,
+    }
+
+
+def monitor_group_public_payload(
+    session: SessionConfig, *, detail: bool = False
+) -> dict[str, Any]:
+    verification = safe_verification_status(session.verification_status)
+    counts = monitor_group_counts_in_daily_center(session)
+    payload: dict[str, Any] = {
+        "group_id": monitor_group_public_id(session),
+        "group_name": redact_visible_text(session.display_name),
+        "enabled": bool(session.enabled),
+        "enabled_label": "启用" if session.enabled else "停用",
+        "verification_status": verification,
+        "verification_label": monitor_group_verification_label(verification),
+        "daily_monitor_enabled": bool(session.daily_monitor_enabled),
+        "daily_monitor_label": (
+            "每日监控" if session.daily_monitor_enabled else "不做每日监控"
+        ),
+        "include_in_daily": bool(session.include_in_daily),
+        "include_daily_label": "纳入日报" if session.include_in_daily else "不纳入日报",
+        "counts_in_daily_center": counts,
+        "group_type": redact_visible_text(session.group_type),
+        "module_name": redact_visible_text(session.module_name),
+        "customer_stage": redact_visible_text(session.customer_stage),
+        "owner_label": redact_visible_text(session.owner_name) or "待指定负责人",
+        "configuration_status_label": monitor_group_configuration_label(session),
+        "can_edit": True,
+        "can_disable": bool(session.enabled),
+        "can_trial_read": bool(session.enabled),
+    }
+    if detail:
+        payload.update(
+            {
+                "customer_name": redact_visible_text(session.customer_name),
+                "channel_name": redact_visible_text(session.channel_name),
+                "owner_name": redact_visible_text(session.owner_name),
+                "common_contacts": [
+                    redact_visible_text(contact) for contact in session.common_contacts
+                ],
+                "internal_people": [
+                    redact_visible_text(person) for person in session.internal_people
+                ],
+                "trial_scope": redact_visible_text(session.trial_scope) or "最近50条",
+                "reply_notes": redact_visible_text(session.reply_notes),
+            }
+        )
+    return payload
+
+
+def monitor_group_field_options(config: AppConfig) -> dict[str, list[str]]:
+    return {
+        "group_types": ["测试群", "客户群", "渠道群", "内部群"],
+        "modules": sorted(
+            {session.module_name for session in config.sessions if session.module_name}
+            | {"售后", "订单", "电商设计", "渠道"}
+        ),
+        "customer_stages": ["试读验证", "试用期", "交付期", "合作期", "已收口"],
+        "owners": sorted(
+            {person.person_name for person in config.internal_people if person.person_name}
+            | {session.owner_name for session in config.sessions if session.owner_name}
+        ),
+        "trial_scopes": ["最近50条", "指定时间段"],
+        "verification_statuses": ["待验证", "已验证"],
+    }
+
+
+def find_monitor_group(config: AppConfig, group_id: str | None) -> SessionConfig | None:
+    if not group_id:
+        return None
+    return next(
+        (
+            session
+            for session in config.sessions
+            if monitor_group_public_id(session) == group_id
+        ),
+        None,
+    )
+
+
+def find_monitor_group_by_name(
+    config: AppConfig, group_name: str
+) -> SessionConfig | None:
+    return next(
+        (
+            session
+            for session in config.sessions
+            if clean_text(session.display_name) == group_name
+        ),
+        None,
+    )
+
+
+def monitor_group_public_id(session: SessionConfig) -> str:
+    seed = clean_text(session.external_id) or clean_text(session.display_name)
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+    return f"mg-{digest}"
+
+
+def local_monitor_external_id(group_name: str) -> str:
+    digest = hashlib.sha256(group_name.encode("utf-8")).hexdigest()[:12]
+    return f"local-monitor-{digest}"
+
+
+def safe_verification_status(value: Any) -> str:
+    status = clean_text(value)
+    return status if status in {"pending_verification", "verified"} else "pending_verification"
+
+
+def monitor_group_verification_label(status: str) -> str:
+    return "已验证" if status == "verified" else "待验证"
+
+
+def monitor_group_counts_in_daily_center(session: SessionConfig) -> bool:
+    return bool(
+        session.enabled
+        and session.daily_monitor_enabled
+        and session.include_in_daily
+    )
+
+
+def daily_center_monitor_group_count(config: AppConfig) -> int:
+    return len(
+        [session for session in config.sessions if monitor_group_counts_in_daily_center(session)]
+    )
+
+
+def monitor_group_configuration_label(session: SessionConfig) -> str:
+    missing = []
+    if not clean_text(session.customer_name or session.channel_name):
+        missing.append("客户")
+    if not clean_text(session.owner_name):
+        missing.append("负责人")
+    if not clean_text(session.module_name):
+        missing.append("业务模块")
+    if not session.include_in_daily:
+        missing.append("日报")
+    if not session.daily_monitor_enabled:
+        missing.append("每日监控")
+    if not missing:
+        return "配置完整"
+    return "待补：" + "、".join(missing)
+
+
 def config_center_payload(config: AppConfig) -> dict[str, Any]:
     enabled_whitelist_count = len(
         [s for s in config.sessions if s.enabled and s.is_whitelisted]
@@ -2011,6 +2259,13 @@ def config_center_payload(config: AppConfig) -> dict[str, Any]:
                     "reply_notes": session.reply_notes,
                     "is_whitelisted": bool(session.is_whitelisted),
                     "enabled": bool(session.enabled),
+                    "verification_status": safe_verification_status(
+                        session.verification_status
+                    ),
+                    "daily_monitor_enabled": bool(session.daily_monitor_enabled),
+                    "include_in_daily": bool(session.include_in_daily),
+                    "trial_scope": session.trial_scope,
+                    "internal_people": list(session.internal_people),
                 }
                 for session in config.sessions
             ],
@@ -2062,6 +2317,15 @@ def save_config_center_payload(config: AppConfig, payload: dict[str, Any]) -> di
                 reply_notes=clean_text(item.get("reply_notes")),
                 is_whitelisted=bool(item.get("is_whitelisted", True)),
                 enabled=bool(item.get("enabled", True)),
+                verification_status=safe_verification_status(
+                    item.get("verification_status")
+                ),
+                daily_monitor_enabled=parse_bool(
+                    item.get("daily_monitor_enabled"), True
+                ),
+                include_in_daily=parse_bool(item.get("include_in_daily"), True),
+                trial_scope=clean_text(item.get("trial_scope")) or "最近50条",
+                internal_people=clean_text_list(item.get("internal_people")),
             )
             for item in sessions_payload
             if isinstance(item, dict)
@@ -2215,6 +2479,13 @@ def write_config_center_yaml(config: AppConfig) -> None:
                 "reply_notes": session.reply_notes,
                 "is_whitelisted": bool(session.is_whitelisted),
                 "enabled": bool(session.enabled),
+                "verification_status": safe_verification_status(
+                    session.verification_status
+                ),
+                "daily_monitor_enabled": bool(session.daily_monitor_enabled),
+                "include_in_daily": bool(session.include_in_daily),
+                "trial_scope": session.trial_scope,
+                "internal_people": list(session.internal_people),
             }
             for session in config.sessions
         ],

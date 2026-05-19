@@ -316,7 +316,7 @@ function renderGroupProfile(profile, selector) {
     node.innerHTML = rows;
     return;
   }
-  node.innerHTML = `<h3>群 / 客户打标</h3><dl class="profile-list">${rows}</dl>`;
+  node.innerHTML = `<h3>监控群档案</h3><dl class="profile-list">${rows}</dl>`;
 }
 
 async function refreshDailyControl() {
@@ -959,8 +959,35 @@ document.querySelector("#dailyDraftReportBtn").addEventListener("click", async (
 
 document.querySelector("#generateDraftBtn").addEventListener("click", generateDailyDraft);
 document.querySelector("#topGenerateDraftBtn").addEventListener("click", async () => {
-  setWorkspacePage("draft");
+  setWorkspacePage("daily");
   await regenerateDraftReport();
+});
+document.querySelector("#dailyReportRegenerateInlineBtn").addEventListener("click", regenerateDraftReport);
+document.querySelector("#dailyReportEmptyGenerateBtn").addEventListener("click", regenerateDraftReport);
+document.querySelector("#copyDailyReportBtn").addEventListener("click", copyDailyReport);
+document.querySelector("#exportDailyMarkdownBtn").addEventListener("click", exportDailyMarkdown);
+document.querySelector("#confirmDailySettlementBtn").addEventListener("click", () => {
+  const text = currentDailyReportText();
+  if (!text.trim()) {
+    document.querySelector("#dailySettlementResult").textContent = "请先生成日报全文，再确认沉淀。";
+    return;
+  }
+  writeSettlementStatus(reportControlDate(), "已确认沉淀");
+  document.querySelector("#dailySettlementResult").textContent = "已确认沉淀；不会自动写正式区。";
+  renderDailyReportCenter();
+});
+document.querySelector("#markDailyReviewBtn").addEventListener("click", () => {
+  writeSettlementStatus(reportControlDate(), "需要重看");
+  document.querySelector("#dailySettlementResult").textContent = "已标记需要重看。";
+  renderDailyReportCenter();
+});
+document.querySelector("#refreshDailySettlementBtn").addEventListener("click", renderDailyReportCenter);
+document.querySelector("#dailySettlementRows").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-settlement-date]");
+  if (!button) return;
+  document.querySelector("#filterDate").value = button.dataset.settlementDate;
+  await refreshDailyControl();
+  await refreshDraftReportPreview();
 });
 
 document.querySelector("#dailyControlBtn").addEventListener("click", () => {
@@ -974,7 +1001,7 @@ document.querySelector("#dailyExportRealTrialBtn").addEventListener("click", () 
 
 document.querySelector("#exportTemplateBtn").addEventListener("click", openExportTemplateDialog);
 document.querySelector("#closeExportTemplateBtn").addEventListener("click", () => {
-  setWorkspacePage("today");
+  setWorkspacePage("candidates");
 });
 document.querySelector("#refreshExportPreviewBtn").addEventListener("click", refreshExportTemplatePreview);
 document.querySelector("#exportSelectedTemplateBtn").addEventListener("click", () => exportTemplates(false));
@@ -1071,6 +1098,7 @@ document.querySelector("#statusFilter").addEventListener("change", loadItems);
 document.querySelector("#filterDate").addEventListener("change", async () => {
   await loadItems();
   await refreshDailyControl();
+  await refreshDraftReportPreview();
 });
 document.querySelector("#riskOnly").addEventListener("change", renderItems);
 
@@ -1085,12 +1113,21 @@ document.querySelectorAll("[data-type]").forEach((button) => {
 
 document.querySelector("#configBtn").addEventListener("click", openConfigCenter);
 document.querySelector("#configBackBtn").addEventListener("click", () => {
-  setWorkspacePage("today");
+  setWorkspacePage("daily");
 });
-document.querySelector("#groupTagsOpenConfigBtn").addEventListener("click", async () => {
-  await openConfigCenter();
-  showConfigPanel("group-tags");
+document.querySelector("#addMonitorGroupBtn").addEventListener("click", async () => {
+  await ensureConfigCenterLoaded();
+  addMonitorGroupDraft();
 });
+document.querySelector("#monitorGroupSearch").addEventListener("input", renderMonitoringGroups);
+document.querySelector("#saveMonitorGroupBtn").addEventListener("click", saveSelectedMonitorGroup);
+document.querySelector("#disableMonitorGroupBtn").addEventListener("click", disableSelectedMonitorGroup);
+document.querySelector("#addPeoplePagePersonBtn").addEventListener("click", async () => {
+  await ensureConfigCenterLoaded();
+  state.configCenter.editable.internal_people.push({ person_name: "", aliases: [] });
+  renderPeoplePage();
+});
+document.querySelector("#savePeoplePageBtn").addEventListener("click", savePeoplePage);
 document.querySelector("#addSessionBtn").addEventListener("click", () => {
   state.configCenter.editable.sessions.push(emptySession());
   renderSessionRows(state.configCenter.editable.sessions);
@@ -1200,6 +1237,354 @@ function renderConfigCenter(data) {
   document.querySelector("#sensitiveKeywords").value = (data.editable?.risk?.sensitive_keywords || []).join("\n");
   document.querySelector("#safetySummary").textContent =
     `保存不会采集｜试读需确认｜最大条数 ${data.safety?.max_limit || 50}｜最大回看 ${data.safety?.max_lookback_hours || 2} 小时｜默认真实读取：关闭${data.safety?.fixture_service_notice ? "｜当前页面不是 real 配置服务" : ""}`;
+  renderMonitoringGroups();
+  renderPeoplePage();
+}
+
+async function ensureConfigCenterLoaded() {
+  if (state.configCenter) {
+    renderMonitoringGroups();
+    renderPeoplePage();
+    return state.configCenter;
+  }
+  const data = await api("/api/config-center");
+  state.configCenter = data;
+  renderConfigCenter(data);
+  return data;
+}
+
+function monitorGroupMeta() {
+  return storedJson(MONITOR_GROUP_META_STORAGE, {});
+}
+
+function saveMonitorGroupMeta(groups = state.monitorGroups) {
+  const meta = {};
+  groups.forEach((group) => {
+    meta[group.external_id] = {
+      daily_monitor: Boolean(group.daily_monitor),
+      include_in_daily: Boolean(group.include_in_daily),
+      verification_status: group.verification_status || "待验证",
+      trial_range: group.trial_range || "recent50",
+      internal_people: group.internal_people || [],
+    };
+  });
+  localStorage.setItem(MONITOR_GROUP_META_STORAGE, JSON.stringify(meta));
+}
+
+function normalizeMonitorGroup(session, meta = {}) {
+  return {
+    external_id: session.external_id || makeMonitorGroupId(),
+    display_name: session.display_name || "",
+    customer_name: session.customer_name || "",
+    channel_name: session.channel_name || "",
+    module_name: session.module_name || "",
+    owner_name: session.owner_name || "",
+    customer_stage: session.customer_stage || "",
+    group_type: session.group_type || "",
+    common_contacts: session.common_contacts || [],
+    reply_notes: session.reply_notes || "",
+    is_whitelisted: session.is_whitelisted !== false,
+    enabled: session.enabled !== false,
+    daily_monitor: meta.daily_monitor ?? (session.enabled !== false && session.is_whitelisted !== false),
+    include_in_daily: meta.include_in_daily ?? (session.enabled !== false && session.is_whitelisted !== false),
+    verification_status: meta.verification_status || "已验证",
+    trial_range: meta.trial_range || "recent50",
+    internal_people: meta.internal_people || [],
+  };
+}
+
+function makeMonitorGroupId() {
+  return `local-monitor-${Date.now()}`;
+}
+
+function buildMonitorGroups() {
+  const meta = monitorGroupMeta();
+  const sessions = state.configCenter?.editable?.sessions || [];
+  const groups = sessions.map((session) =>
+    normalizeMonitorGroup(session, meta[session.external_id] || {})
+  );
+  if (!groups.some((group) => group.display_name === monitorGroupSeed.display_name)) {
+    groups.push({ ...monitorGroupSeed, ...(meta[monitorGroupSeed.external_id] || {}) });
+  }
+  return groups;
+}
+
+function optionValuesFromGroups(field) {
+  const values = new Set(
+    (state.monitorGroups || [])
+      .map((group) => group[field])
+      .filter(Boolean)
+  );
+  if (field === "customer_name") {
+    values.add("稿定电商");
+    values.add("待确认客户");
+    values.add("新建本地客户占位");
+  }
+  return Array.from(values);
+}
+
+function internalPeopleNames() {
+  const people = state.configCenter?.editable?.internal_people || [];
+  const names = new Set(people.map((person) => person.person_name).filter(Boolean));
+  (state.monitorGroups || []).forEach((group) => {
+    if (group.owner_name) names.add(group.owner_name);
+    (group.internal_people || []).forEach((name) => names.add(name));
+  });
+  return Array.from(names);
+}
+
+function contactOptions() {
+  const values = new Set();
+  (state.monitorGroups || []).forEach((group) => {
+    (group.common_contacts || []).forEach((contact) => values.add(contact));
+  });
+  values.add("常用联系人待补");
+  return Array.from(values);
+}
+
+function setOptions(select, options, selected, { allowEmpty = true, multiple = false } = {}) {
+  const selectedValues = new Set(Array.isArray(selected) ? selected : [selected].filter(Boolean));
+  const normalized = options.map((option) => Array.isArray(option) ? option : [option, option]);
+  select.innerHTML = [
+    ...(allowEmpty && !multiple ? [["", "待选择"]] : []),
+    ...normalized,
+  ].map(([value, label]) =>
+    `<option value="${escapeAttr(value)}" ${selectedValues.has(value) ? "selected" : ""}>${escapeHtml(label)}</option>`
+  ).join("");
+}
+
+function selectedValues(select) {
+  return Array.from(select.selectedOptions || []).map((option) => option.value).filter(Boolean);
+}
+
+function groupCompleteness(group) {
+  const required = [
+    group.display_name,
+    group.customer_name,
+    group.group_type,
+    group.module_name,
+    group.customer_stage,
+    group.owner_name,
+  ];
+  const done = required.filter(Boolean).length;
+  return {
+    done,
+    total: required.length,
+    label: done === required.length ? "配置完整" : `待补 ${required.length - done} 项`,
+  };
+}
+
+function renderMonitoringGroups() {
+  const list = document.querySelector("#monitorGroupList");
+  if (!list || !state.configCenter) return;
+  const query = (document.querySelector("#monitorGroupSearch")?.value || "").trim();
+  const baseGroups = buildMonitorGroups();
+  const transientGroups = (state.monitorGroups || []).filter((group) =>
+    !baseGroups.some((base) => base.external_id === group.external_id)
+  );
+  state.monitorGroups = [...baseGroups, ...transientGroups];
+  if (!state.selectedMonitorGroupId || !state.monitorGroups.some((group) => group.external_id === state.selectedMonitorGroupId)) {
+    state.selectedMonitorGroupId = state.monitorGroups[0]?.external_id || "";
+  }
+  const filtered = state.monitorGroups.filter((group) => {
+    if (!query) return true;
+    return [group.display_name, group.customer_name, group.owner_name, group.module_name]
+      .some((value) => String(value || "").includes(query));
+  });
+  list.innerHTML = filtered.map((group) => {
+    const complete = groupCompleteness(group);
+    const monitorText = group.enabled === false
+      ? "已停用"
+      : group.daily_monitor && group.include_in_daily && group.verification_status !== "待验证"
+        ? "已纳入日报"
+        : "待验证 / 未纳入日报";
+    return `
+      <button class="monitor-group-card ${group.external_id === state.selectedMonitorGroupId ? "active" : ""}" data-monitor-group-id="${escapeAttr(group.external_id)}">
+        <strong>${escapeHtml(group.display_name || "未命名监控群")}</strong>
+        <span>${escapeHtml(group.customer_name || "待选择客户")}｜${escapeHtml(group.group_type || "待选群类型")}</span>
+        <small>${escapeHtml(monitorText)}｜${escapeHtml(complete.label)}｜负责人：${escapeHtml(group.owner_name || "待指定")}</small>
+      </button>
+    `;
+  }).join("") || '<div class="empty">没有匹配的监控群。</div>';
+  list.querySelectorAll("[data-monitor-group-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedMonitorGroupId = button.dataset.monitorGroupId;
+      renderMonitoringGroups();
+    });
+  });
+  renderMonitorGroupEditor();
+  renderDailyReportCenter();
+}
+
+function renderMonitorGroupEditor() {
+  const group = state.monitorGroups.find((item) => item.external_id === state.selectedMonitorGroupId);
+  const title = document.querySelector("#monitorGroupEditorTitle");
+  if (!title || !group) return;
+  const completeness = groupCompleteness(group);
+  title.textContent = group.display_name || "新监控群";
+  document.querySelector("#monitorGroupEditorStatus").textContent =
+    `${group.verification_status || "待验证"}｜${group.enabled === false ? "已停用" : "启用中"}｜试读成功前不会自动纳入日报统计`;
+  document.querySelector("#monitorGroupCompleteness").textContent = completeness.label;
+  document.querySelector("#monitorGroupDisplayName").value = group.display_name || "";
+  setOptions(document.querySelector("#monitorGroupCustomer"), optionValuesFromGroups("customer_name"), group.customer_name);
+  setOptions(document.querySelector("#monitorGroupType"), monitorGroupOptions.groupTypes, group.group_type);
+  setOptions(document.querySelector("#monitorGroupModule"), [
+    ...new Set([...monitorGroupOptions.modules, ...optionValuesFromGroups("module_name")]),
+  ], group.module_name);
+  setOptions(document.querySelector("#monitorGroupStage"), monitorGroupOptions.stages, group.customer_stage);
+  setOptions(document.querySelector("#monitorGroupOwner"), internalPeopleNames(), group.owner_name);
+  setOptions(document.querySelector("#monitorGroupContacts"), contactOptions(), group.common_contacts || [], { allowEmpty: false, multiple: true });
+  setOptions(document.querySelector("#monitorGroupInternalPeople"), internalPeopleNames(), group.internal_people || [], { allowEmpty: false, multiple: true });
+  setOptions(document.querySelector("#monitorGroupTrialRange"), monitorGroupOptions.trialRanges, group.trial_range || "recent50", { allowEmpty: false });
+  setOptions(document.querySelector("#monitorGroupVerifyStatus"), monitorGroupOptions.verifyStatuses, group.verification_status || "待验证", { allowEmpty: false });
+  document.querySelector("#monitorGroupDailyMonitor").checked = Boolean(group.daily_monitor);
+  document.querySelector("#monitorGroupIncludeDaily").checked = Boolean(group.include_in_daily);
+  document.querySelector("#monitorGroupReplyNotes").value = group.reply_notes || "";
+}
+
+function readMonitorGroupForm() {
+  const current = state.monitorGroups.find((group) => group.external_id === state.selectedMonitorGroupId) || {
+    external_id: makeMonitorGroupId(),
+  };
+  return {
+    ...current,
+    display_name: document.querySelector("#monitorGroupDisplayName").value.trim(),
+    customer_name: document.querySelector("#monitorGroupCustomer").value,
+    group_type: document.querySelector("#monitorGroupType").value,
+    module_name: document.querySelector("#monitorGroupModule").value,
+    customer_stage: document.querySelector("#monitorGroupStage").value,
+    owner_name: document.querySelector("#monitorGroupOwner").value,
+    common_contacts: selectedValues(document.querySelector("#monitorGroupContacts")),
+    internal_people: selectedValues(document.querySelector("#monitorGroupInternalPeople")),
+    trial_range: document.querySelector("#monitorGroupTrialRange").value,
+    daily_monitor: document.querySelector("#monitorGroupDailyMonitor").checked,
+    include_in_daily: document.querySelector("#monitorGroupIncludeDaily").checked,
+    verification_status: document.querySelector("#monitorGroupVerifyStatus").value,
+    reply_notes: document.querySelector("#monitorGroupReplyNotes").value.trim(),
+    is_whitelisted: true,
+  };
+}
+
+function monitorGroupToSession(group) {
+  return {
+    external_id: group.external_id || makeMonitorGroupId(),
+    display_name: group.display_name || "未命名监控群",
+    customer_name: group.customer_name || "",
+    channel_name: group.channel_name || "",
+    module_name: group.module_name || "",
+    owner_name: group.owner_name || "",
+    customer_stage: group.customer_stage || "",
+    group_type: group.group_type || "",
+    common_contacts: group.common_contacts || [],
+    reply_notes: group.reply_notes || "",
+    is_whitelisted: true,
+    enabled: group.enabled !== false,
+  };
+}
+
+async function saveConfigFromState() {
+  const editable = state.configCenter?.editable || {};
+  const result = await api("/api/config-center", {
+    method: "POST",
+    body: JSON.stringify({
+      sessions: (state.monitorGroups || []).map(monitorGroupToSession),
+      internal_people: editable.internal_people || [],
+      risk: editable.risk || {},
+      trial_defaults: {
+        ...(editable.trial_defaults || {}),
+        real_read_enabled: false,
+      },
+    }),
+  });
+  state.configCenter.editable = result.editable;
+  renderConfigCenter(state.configCenter);
+  return result;
+}
+
+async function saveSelectedMonitorGroup() {
+  const group = readMonitorGroupForm();
+  if (!group.display_name) {
+    document.querySelector("#monitorGroupSaveResult").textContent = "请先填写监控群名称。";
+    return;
+  }
+  const index = state.monitorGroups.findIndex((item) => item.external_id === group.external_id);
+  if (index >= 0) state.monitorGroups[index] = group;
+  else state.monitorGroups.push(group);
+  state.selectedMonitorGroupId = group.external_id;
+  saveMonitorGroupMeta();
+  try {
+    await saveConfigFromState();
+    document.querySelector("#monitorGroupSaveResult").textContent = "已保存监控群档案；不会自动读取或外发。";
+  } catch (_error) {
+    document.querySelector("#monitorGroupSaveResult").textContent = "已暂存在本机浏览器；配置保存暂不可用。";
+  }
+  renderMonitoringGroups();
+}
+
+async function disableSelectedMonitorGroup() {
+  const group = readMonitorGroupForm();
+  group.enabled = false;
+  group.daily_monitor = false;
+  group.include_in_daily = false;
+  const index = state.monitorGroups.findIndex((item) => item.external_id === group.external_id);
+  if (index >= 0) state.monitorGroups[index] = group;
+  saveMonitorGroupMeta();
+  try {
+    await saveConfigFromState();
+    document.querySelector("#monitorGroupSaveResult").textContent = "已停用该监控群。";
+  } catch (_error) {
+    document.querySelector("#monitorGroupSaveResult").textContent = "已在本机页面停用；配置保存暂不可用。";
+  }
+  renderMonitoringGroups();
+}
+
+function addMonitorGroupDraft() {
+  const group = {
+    ...monitorGroupSeed,
+    external_id: makeMonitorGroupId(),
+    display_name: "",
+    customer_name: "",
+    module_name: "",
+    owner_name: "",
+    common_contacts: [],
+    internal_people: [],
+    reply_notes: "",
+  };
+  state.monitorGroups = [...(state.monitorGroups || []), group];
+  state.selectedMonitorGroupId = group.external_id;
+  renderMonitoringGroups();
+  document.querySelector("#monitorGroupDisplayName")?.focus();
+}
+
+function renderPeoplePage() {
+  const container = document.querySelector("#peoplePageRows");
+  if (!container || !state.configCenter) return;
+  const people = state.configCenter.editable?.internal_people || [];
+  container.innerHTML = people.map((person, index) => `
+    <div class="editor-row" data-people-page-index="${index}">
+      <label>人员名称<input data-field="person_name" value="${escapeAttr(person.person_name)}" /></label>
+      <label class="wide">别名，逗号分隔<input data-field="aliases" value="${escapeAttr((person.aliases || []).join(", "))}" /></label>
+    </div>
+  `).join("") || '<div class="empty">还没有我方人员。下一步：新增人员后保存。</div>';
+}
+
+async function savePeoplePage() {
+  await ensureConfigCenterLoaded();
+  state.configCenter.editable.internal_people = Array.from(document.querySelectorAll("[data-people-page-index]")).map((row) => {
+    const data = readEditorRow(row);
+    return {
+      person_name: data.person_name,
+      aliases: String(data.aliases || "").split(",").map((item) => item.trim()).filter(Boolean),
+    };
+  }).filter((person) => person.person_name);
+  try {
+    await saveConfigFromState();
+    document.querySelector("#peoplePageResult").textContent = "已保存我方人员。";
+  } catch (_error) {
+    document.querySelector("#peoplePageResult").textContent = "人员已在本机页面更新；配置保存暂不可用。";
+  }
+  renderPeoplePage();
+  renderMonitoringGroups();
 }
 
 function renderTrialCards(latest) {
@@ -1502,6 +1887,7 @@ function binaryConfiguredText(info) {
 
 function saveWorkspaceState() {
   localStorage.setItem("inbox_v1_state", JSON.stringify({
+    version: WORKSPACE_STATE_VERSION,
     page: state.activePage,
     itemSource: state.itemSource,
     filterDate: document.querySelector("#filterDate")?.value || today,
@@ -1513,6 +1899,7 @@ function saveWorkspaceState() {
 
 function restoreWorkspaceState() {
   const saved = savedWorkspaceState || {};
+  const isCurrentVersion = saved.version === WORKSPACE_STATE_VERSION;
   if (document.querySelector("#statusFilter") && saved.statusFilter !== undefined) {
     document.querySelector("#statusFilter").value = saved.statusFilter;
   }
@@ -1523,7 +1910,7 @@ function restoreWorkspaceState() {
     document.querySelector("#draftDataSourceChoice").value = saved.draftDataSource;
   }
   state.itemSource = saved.itemSource || state.itemSource || "workspace";
-  setWorkspacePage(saved.page || "today");
+  setWorkspacePage(isCurrentVersion ? (saved.page || "daily") : "daily");
 }
 
 function pageShouldBeVisible(node, page) {
@@ -1532,7 +1919,7 @@ function pageShouldBeVisible(node, page) {
 }
 
 function setWorkspacePage(page) {
-  state.activePage = page || "today";
+  state.activePage = page || "daily";
   document.body.dataset.activePage = state.activePage;
   document.querySelector("#appShell")?.setAttribute("data-active-page", state.activePage);
   document.querySelectorAll("#inboxV1Nav [data-page-target]").forEach((button) => {
@@ -1544,6 +1931,9 @@ function setWorkspacePage(page) {
   if (state.activePage === "candidates") setItemSource(state.itemSource || "workspace");
   if (state.activePage === "transfer") refreshExportTemplatePreview();
   if (state.activePage === "draft") refreshDraftReportPreview();
+  if (state.activePage === "group-management" || state.activePage === "people") {
+    ensureConfigCenterLoaded();
+  }
   saveWorkspaceState();
 }
 
@@ -1565,6 +1955,8 @@ document.querySelectorAll("#inboxV1Nav [data-page-target]").forEach((button) => 
 restoreWorkspaceState();
 if (state.activePage === "config") {
   openConfigCenter({ setPage: false });
+} else {
+  ensureConfigCenterLoaded();
 }
 applyTransferTask(state.transferTask, { skipPreview: true });
 refreshStatus().then(loadItems).then(refreshDailyControl).then(refreshInboxV1);

@@ -106,8 +106,8 @@ class RealTrialLatestVisibilityTest(unittest.TestCase):
             / "index.html"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("/static/styles.css?v=20260518-inbox-v1", index_html)
-        self.assertIn("/static/app.js?v=20260518-inbox-v1", index_html)
+        self.assertIn("/static/styles.css?v=20260519-daily-center-p0", index_html)
+        self.assertIn("/static/app.js?v=20260519-daily-center-p0", index_html)
 
     def test_real_trial_summary_has_redacted_error_fallback(self):
         app_js = (
@@ -809,7 +809,7 @@ class RealTrialLatestVisibilityTest(unittest.TestCase):
         self.assertIn("群类型", index_html)
         self.assertIn("常用联系人", index_html)
         self.assertIn("回复注意事项", index_html)
-        self.assertIn("微信反馈防漏收件箱 V1", index_html)
+        self.assertIn("微信反馈日报中心", index_html)
         self.assertIn("50 条是原始消息", index_html)
         self.assertIn("3 条是抽出来的候选事项", index_html)
         self.assertIn("/api/inbox/v1", app_js)
@@ -833,8 +833,10 @@ class RealTrialLatestVisibilityTest(unittest.TestCase):
             root / "src" / "wechat_feedback_app" / "static" / "index.html"
         ).read_text(encoding="utf-8")
 
-        for page in ["today", "messages", "candidates", "group-tags", "draft", "transfer", "config"]:
+        for page in ["daily", "today", "messages", "candidates", "group-management", "people", "config"]:
             self.assertIn(f'data-page-target="{page}"', index_html)
+            self.assertIn(f'data-page="{page}"', index_html)
+        for page in ["draft", "transfer"]:
             self.assertIn(f'data-page="{page}"', index_html)
         self.assertIn("humanStatusCards", index_html)
         self.assertIn("diagnosticDetails", index_html)

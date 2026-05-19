@@ -71,7 +71,7 @@ class RealConnectionRedactionTest(unittest.TestCase):
         self.assertNotIn("ready.binary_path", app_js)
         self.assertNotIn("binary=", app_js)
         self.assertNotIn("JSON.stringify(data, null, 2)", app_js)
-        self.assertIn("session_configured", app_js)
+        self.assertIn("enabled_whitelist_count", app_js)
         self.assertIn("binaryConfiguredText", app_js)
         self.assertIn("openConfigCenter", app_js)
         self.assertIn("renderConfigCenter", app_js)

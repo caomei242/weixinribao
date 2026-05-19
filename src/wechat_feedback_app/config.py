@@ -7,6 +7,8 @@ from typing import Any
 
 
 TRIAL_SESSION_NAME = "襄城县大斌网络科技有限公司X稿定"
+SECOND_TEST_GROUP_ID = "local-monitor-qiajie-gaoding"
+SECOND_TEST_GROUP_NAME = "洽姐x稿定电商"
 
 
 @dataclass
@@ -131,25 +133,7 @@ def default_config(root: Path | None = None) -> AppConfig:
                 ["渠道C对接人"],
                 "涉及商务口径先内部确认",
             ),
-            SessionConfig(
-                "local-monitor-qiajie-gaoding",
-                "洽姐x稿定电商",
-                "",
-                "",
-                "电商设计",
-                "",
-                "试读验证",
-                "测试群",
-                [],
-                "",
-                True,
-                True,
-                "pending_verification",
-                True,
-                False,
-                "最近50条",
-                [],
-            ),
+            second_test_group_config(),
         ],
         internal_people=[
             PersonConfig("张三", ["张三", "Jason"]),
@@ -272,7 +256,38 @@ def load_config(path: Path | str | None = None, root: Path | None = None) -> App
             str(item) for item in risk.get("sensitive_keywords", [])
         ]
 
+    ensure_default_monitor_groups(config)
     return config
+
+
+def second_test_group_config() -> SessionConfig:
+    return SessionConfig(
+        SECOND_TEST_GROUP_ID,
+        SECOND_TEST_GROUP_NAME,
+        "",
+        "",
+        "电商设计",
+        "",
+        "试读验证",
+        "测试群",
+        [],
+        "",
+        True,
+        True,
+        "pending_verification",
+        True,
+        False,
+        "最近50条",
+        [],
+    )
+
+
+def ensure_default_monitor_groups(config: AppConfig) -> None:
+    existing_ids = {session.external_id for session in config.sessions}
+    existing_names = {session.display_name for session in config.sessions}
+    if SECOND_TEST_GROUP_ID in existing_ids or SECOND_TEST_GROUP_NAME in existing_names:
+        return
+    config.sessions.append(second_test_group_config())
 
 
 def resolve_path(root: Path, value: str) -> Path:

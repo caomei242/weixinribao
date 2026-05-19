@@ -1,10 +1,18 @@
+from __future__ import annotations
+
 import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-from wechat_feedback_app.config import AppConfig, SessionConfig, WxCliConfig, default_config
+from wechat_feedback_app.config import (
+    AppConfig,
+    SessionConfig,
+    WxCliConfig,
+    default_config,
+    load_config,
+)
 from wechat_feedback_app.db import connect, init_db
 from wechat_feedback_app.routes import (
     candidate_resolution_status_payload,
@@ -143,6 +151,38 @@ class DailyCenterMonitorGroupsTest(unittest.TestCase):
             self.assertFalse(second["include_in_daily"])
             self.assertFalse(second["counts_in_daily_center"])
 
+    def test_load_config_adds_second_test_group_to_legacy_local_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "app.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                """
+app:
+  host: "127.0.0.1"
+  port: 8765
+wx_cli:
+  real_read_enabled: false
+sessions:
+  - external_id: "legacy-only"
+    display_name: "旧配置监控群"
+    is_whitelisted: true
+    enabled: true
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path, root=root)
+            payload = monitor_groups_payload(config)
+
+            second = next(
+                group for group in payload["groups"] if group["group_name"] == "洽姐x稿定电商"
+            )
+            self.assertEqual(second["verification_label"], "待验证")
+            self.assertFalse(second["include_in_daily"])
+            self.assertFalse(second["counts_in_daily_center"])
+
             created = save_monitor_group_payload(
                 config,
                 {
@@ -192,12 +232,12 @@ class DailyCenterMonitorGroupsTest(unittest.TestCase):
                 group_id=group_id,
             )
             self.assertTrue(updated["group"]["counts_in_daily_center"])
-            self.assertEqual(monitor_groups_payload(config)["daily_center_count"], 4)
+            self.assertEqual(monitor_groups_payload(config)["daily_center_count"], 2)
 
             disabled = disable_monitor_group_payload(config, group_id)
             self.assertEqual(disabled["status"], "disabled")
             self.assertFalse(disabled["group"]["enabled"])
-            self.assertEqual(monitor_groups_payload(config)["daily_center_count"], 3)
+            self.assertEqual(monitor_groups_payload(config)["daily_center_count"], 1)
 
             saved_text = (root / "config" / "app.yaml").read_text(encoding="utf-8")
             self.assertIn("real_read_enabled: false", saved_text)
