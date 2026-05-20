@@ -10,11 +10,14 @@ from wechat_feedback_app.config import AppConfig, SessionConfig, WxCliConfig
 from wechat_feedback_app.db import setup_database
 from wechat_feedback_app.routes import (
     config_center_payload,
+    detected_wechat_group_sessions,
+    monitor_groups_payload,
     persistent_real_read_control_payload,
     real_trial_run_plan,
     safe_config_payload,
     safe_status_payload,
     save_config_center_payload,
+    upsert_detected_monitor_groups,
 )
 from wechat_feedback_app.wx_cli_adapter import NormalizedMessage
 
@@ -127,6 +130,31 @@ def english_room_group_probe_payload() -> dict[str, object]:
                 "display_name": "Operations Group",
                 "chat_type": "chatroom",
             },
+        ],
+    }
+
+
+def readable_group_metadata_probe_payload() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "sessions": [
+            {
+                "id": "123456789012345@chatroom",
+                "group_name": "Readable Probe Group",
+                "chat_type": "chatroom",
+            }
+        ],
+    }
+
+
+def internal_id_only_group_probe_payload() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "sessions": [
+            {
+                "id": "123456789012345@chatroom",
+                "chat_type": "chatroom",
+            }
         ],
     }
 
@@ -317,6 +345,149 @@ class PersistentRealReadContractTest(unittest.TestCase):
         self.assertEqual(result["scope"]["detected_group_count"], 1)
         self.assertEqual(result["scope"]["excluded_non_group_count"], 2)
         assert_no_sensitive_fields(self, result)
+
+    def test_persistent_all_wechat_groups_uses_readable_metadata_as_saved_display_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = sample_config(Path(tmp), enabled=True)
+
+            result = real_trial_run_plan(
+                config,
+                all_wechat_groups_payload(),
+                executor=lambda plan: {
+                    "status": "success",
+                    "sessions_total": plan["selected_group_count"],
+                    "sessions_success": plan["selected_group_count"],
+                },
+                session_probe=lambda _config: readable_group_metadata_probe_payload(),
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["scope"]["detected_group_count"], 1)
+            detected = next(
+                session
+                for session in config.sessions
+                if session.display_name == "Readable Probe Group"
+            )
+            self.assertEqual(detected.display_name_status, "resolved")
+            self.assertEqual(detected.display_name_source, "group_name")
+            public = next(
+                group
+                for group in monitor_groups_payload(config)["groups"]
+                if group["group_name"] == "Readable Probe Group"
+            )
+            self.assertEqual(public["display_name_status"], "resolved")
+            self.assertNotIn("@chatroom", json.dumps(public, ensure_ascii=False))
+            assert_no_sensitive_fields(self, result)
+
+    def test_persistent_all_wechat_groups_marks_internal_id_only_display_unresolved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = sample_config(Path(tmp), enabled=True)
+
+            result = real_trial_run_plan(
+                config,
+                all_wechat_groups_payload(),
+                executor=lambda plan: {
+                    "status": "success",
+                    "sessions_total": plan["selected_group_count"],
+                    "sessions_success": plan["selected_group_count"],
+                },
+                session_probe=lambda _config: internal_id_only_group_probe_payload(),
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["scope"]["detected_group_count"], 1)
+            self.assertEqual(result["scope"]["unresolved_display_name_count"], 1)
+            unresolved = next(
+                session
+                for session in config.sessions
+                if session.display_name == "群名待解析"
+            )
+            self.assertEqual(unresolved.display_name_status, "unresolved")
+            self.assertEqual(
+                unresolved.display_name_reason_code, "internal_identifier_only"
+            )
+            public = next(
+                group
+                for group in monitor_groups_payload(config)["groups"]
+                if group["group_name"] == "群名待解析"
+            )
+            self.assertEqual(public["display_name_status"], "unresolved")
+            self.assertEqual(
+                public["display_name_reason_code"], "internal_identifier_only"
+            )
+            self.assertNotIn(
+                "123456789012345@chatroom",
+                json.dumps(public, ensure_ascii=False),
+            )
+            assert_no_sensitive_fields(self, result)
+
+    def test_unresolved_placeholder_does_not_merge_different_detected_groups_by_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = sample_config(Path(tmp), enabled=True)
+            sessions_a, _summary_a = detected_wechat_group_sessions(
+                {
+                    "status": "ok",
+                    "sessions": [
+                        {"id": "100000000001@chatroom", "chat_type": "chatroom"}
+                    ],
+                }
+            )
+            sessions_b, _summary_b = detected_wechat_group_sessions(
+                {
+                    "status": "ok",
+                    "sessions": [
+                        {"id": "100000000002@chatroom", "chat_type": "chatroom"}
+                    ],
+                }
+            )
+
+            first_inserted = upsert_detected_monitor_groups(config, sessions_a)
+            second_inserted = upsert_detected_monitor_groups(config, sessions_b)
+
+            self.assertEqual(first_inserted, 1)
+            self.assertEqual(second_inserted, 1)
+            unresolved_count = len(
+                [
+                    session
+                    for session in config.sessions
+                    if session.display_name == "群名待解析"
+                    and session.display_name_status == "unresolved"
+                ]
+            )
+            self.assertEqual(unresolved_count, 2)
+
+    def test_same_external_id_unresolved_group_can_upgrade_to_resolved_display_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = sample_config(Path(tmp), enabled=True)
+            unresolved, _summary_unresolved = detected_wechat_group_sessions(
+                {
+                    "status": "ok",
+                    "sessions": [
+                        {"id": "100000000003@chatroom", "chat_type": "chatroom"}
+                    ],
+                }
+            )
+            resolved, _summary_resolved = detected_wechat_group_sessions(
+                {
+                    "status": "ok",
+                    "sessions": [
+                        {
+                            "id": "100000000003@chatroom",
+                            "group_name": "Readable Upgrade Group",
+                            "chat_type": "chatroom",
+                        }
+                    ],
+                }
+            )
+
+            self.assertEqual(upsert_detected_monitor_groups(config, unresolved), 1)
+            self.assertEqual(upsert_detected_monitor_groups(config, resolved), 0)
+            upgraded = next(
+                session
+                for session in config.sessions
+                if session.display_name == "Readable Upgrade Group"
+            )
+            self.assertEqual(upgraded.display_name_status, "resolved")
 
     def test_persistent_all_wechat_groups_probe_failure_blocks_before_history(self):
         config = sample_config(enabled=True)

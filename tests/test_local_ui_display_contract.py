@@ -27,7 +27,7 @@ class LocalUiDisplayContractTest(unittest.TestCase):
     def test_monitor_groups_main_fields_keep_local_display_values_with_safe_copies(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            raw_group_name = "local-group-12345678@chatroom"
+            raw_group_name = "本地可读群 13812345678"
             config, conn = self._setup(
                 root,
                 sessions=[
@@ -62,7 +62,7 @@ class LocalUiDisplayContractTest(unittest.TestCase):
     def test_messages_main_fields_keep_group_customer_and_module_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            raw_group_name = "local-message-group-12345678@chatroom"
+            raw_group_name = "本地消息群 13812345678"
             config, conn = self._setup(
                 root,
                 sessions=[
@@ -88,6 +88,46 @@ class LocalUiDisplayContractTest(unittest.TestCase):
             self.assertIn("[敏感信息已脱敏]", groups[1]["group_name_safe"])
             self.assertIn("[敏感信息已脱敏]", message["customer_label_safe"])
             self.assertFalse(payload["safety"]["content_returned"])
+
+    def test_internal_chatroom_id_is_not_used_as_group_display_across_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            internal_group_id = "123456789012345@chatroom"
+            config, conn = self._setup(
+                root,
+                sessions=[SessionConfig("detected-a", internal_group_id)],
+            )
+            self._insert_raw_message(conn, "detected-a", internal_group_id)
+
+            monitor_payload = monitor_groups_payload(config)
+            detail = monitor_group_detail_payload(
+                config, monitor_payload["groups"][0]["group_id"], conn
+            )
+            groups = message_group_options(config, conn)
+            messages = messages_v1_payload(config, conn, groups[1]["group_id"])
+
+            self.assertEqual(monitor_payload["groups"][0]["group_name"], "群名待解析")
+            self.assertEqual(
+                monitor_payload["groups"][0]["display_name_status"], "unresolved"
+            )
+            self.assertEqual(
+                monitor_payload["groups"][0]["display_name_reason_code"],
+                "internal_identifier_only",
+            )
+            self.assertEqual(detail["group"]["group_name"], "群名待解析")
+            self.assertEqual(groups[1]["group_name"], "群名待解析")
+            self.assertEqual(groups[1]["group_name_status"], "unresolved")
+            self.assertEqual(messages["messages"][0]["group_name"], "群名待解析")
+            visible_payload = json.dumps(
+                {
+                    "monitor": monitor_payload["groups"][0],
+                    "detail": detail["group"],
+                    "message_group": groups[1],
+                    "message": messages["messages"][0],
+                },
+                ensure_ascii=False,
+            )
+            self.assertNotIn(internal_group_id, visible_payload)
 
     def test_internal_people_main_fields_keep_display_values_with_safe_copies(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +160,19 @@ class LocalUiDisplayContractTest(unittest.TestCase):
             self.assertIn("[敏感信息已脱敏]", person["person_name_safe"])
             self.assertIn("[敏感信息已脱敏]", first_suggestion["person_name_safe"])
 
+    def test_internal_people_internal_id_requires_display_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config, conn = self._setup(Path(tmp))
+
+            suggestion = internal_people_suggestions_payload(
+                config, conn, {"wechat_id": "wxid_internal_only"}
+            )
+
+            self.assertEqual(suggestion["status"], "requires_display_name")
+            self.assertTrue(suggestion["requires_display_name"])
+            self.assertEqual(suggestion["count"], 0)
+            self.assertNotIn("wxid_internal_only", json.dumps(suggestion, ensure_ascii=False))
+
     def test_candidate_and_daily_ui_fields_keep_main_text_while_safe_fields_redact(self):
         item = {
             "id": 1,
@@ -132,6 +185,7 @@ class LocalUiDisplayContractTest(unittest.TestCase):
             "module_name": "模块 13812345678",
             "title": "标题 13812345678",
             "summary": "摘要 13812345678",
+            "group_name": "候选可读群 13812345678",
         }
 
         followup = daily_followup_items_payload([item], set(), "today_top_followups")[0]
@@ -147,10 +201,32 @@ class LocalUiDisplayContractTest(unittest.TestCase):
 
         for row in (followup, focus, inbox):
             self.assertTrue(row["summary"] == "摘要 13812345678")
+            self.assertTrue(row["group_label"] == "候选可读群 13812345678")
             self.assertIn("[敏感信息已脱敏]", row["summary_safe"])
         self.assertTrue(followup["customer_label"] == "客户 13812345678")
         self.assertTrue(followup["module_label"] == "模块 13812345678")
         self.assertIn("[敏感信息已脱敏]", followup["customer_label_safe"])
+
+        internal_group_item = dict(item)
+        internal_group_item["group_name"] = "123456789012345@chatroom"
+        internal_followup = daily_followup_items_payload(
+            [internal_group_item], set(), "today_top_followups"
+        )[0]
+        internal_focus = daily_center_today_focus_payload(
+            "2026-05-20",
+            [internal_group_item],
+            [],
+            1,
+            {},
+            False,
+        )["items"][0]
+        internal_inbox = build_candidate_inbox_items(
+            [internal_group_item], "workspace", set()
+        )[0]
+        for row in (internal_followup, internal_focus, internal_inbox):
+            self.assertEqual(row["group_label"], "群名待解析")
+            self.assertEqual(row["group_label_status"], "unresolved")
+            self.assertEqual(row["group_label_reason_code"], "internal_identifier_only")
 
     def test_real_trial_latest_items_keep_main_title_summary_and_safe_copies(self):
         with tempfile.TemporaryDirectory() as tmp:

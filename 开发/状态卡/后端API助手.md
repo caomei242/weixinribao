@@ -1,6 +1,6 @@
 # 微信agent专项 后端/API 助手状态卡
 
-更新时间：2026-05-20 22:41 CST
+更新时间：2026-05-20 23:26 CST
 
 ## 线程身份
 
@@ -12,62 +12,63 @@
 
 ## 本轮任务
 
-- 任务标记：`监工返工：2026-05-20｜后端API｜本地操作台主显示字段去误脱敏`
+- 任务标记：`2026-05-20｜后端API｜unresolved 群名占位去重防误合并`
 - 状态：完成，待监工验收
-- 结论：后端 payload 已区分“本地操作台主显示字段”和“跨线程 / report-safe 脱敏字段”。群管理、消息明细、我方人员、候选 / 日报、最近试读候选的主显示字段保留本地 UI 可识别值；同 payload 增补或保留 `*_safe` / `redacted_*` 字段用于回报、smoke、测试审查等安全摘要。
+- 结论：已收口发布前小修。`upsert_detected_monitor_groups()` 的名称去重只允许 resolved 可读 `display_name` 参与；`unresolved`、`群名待解析`、`internal_identifier_only` 不再作为跨 external_id 去重键。
 
 ## 改动文件
 
 - `/Users/gd/Desktop/微信agent专项/src/wechat_feedback_app/routes.py`
-- `/Users/gd/Desktop/微信agent专项/src/wechat_feedback_app/exporter.py`
-- `/Users/gd/Desktop/微信agent专项/tests/test_local_ui_display_contract.py`
+- `/Users/gd/Desktop/微信agent专项/tests/test_persistent_real_read_contract.py`
 - `/Users/gd/Desktop/微信agent专项/开发/状态卡/后端API助手.md`
 - `/Users/gd/Desktop/微信agent专项/开发/监工回报队列.md`
 
-说明：未修改前台静态文件；工作区中 `AGENTS.md` 及其他总控/监工侧记录为既有未提交改动，本棒未回滚。
+说明：未改前台静态文件；未回滚其他线程已存在改动。
 
 ## 关键实现
 
-- 新增 `local_ui_display_text()` / `local_ui_display_list()`：保留本地 UI 普通可识别名称，不因通用脱敏规则误伤主字段；但仍拦截硬禁 token、路径、raw/content 标记和测试敏感标记。
-- 群管理 payload：`group_name`、`display_name`、`customer_name`、`group_type`、`module_name`、`customer_stage`、`owner_label`、detail 联系人/备注等改为本地 UI 主字段真值，同时提供 safe 副本。
-- 消息明细 payload：群标签、客户标签、模块标签主字段可读，同时提供 safe 副本；正文和 raw payload 仍不返回。
-- 我方人员 payload / suggestion：人员姓名、微信显示名、模块、notes、建议主字段可读，同时提供 safe 副本。
-- 候选 / 日报 / 最近试读：本地审阅字段与 report-safe 字段分层；日报全文、转述预览、smoke / 白名单旧安全合同继续使用脱敏摘要，不让硬禁标记进入跨线程可引用字段。
-- `redact_visible_text()` 增补测试敏感标记脱敏，确保旧 report-safe 合同不回退。
+- `by_name` 只索引 resolved 可读群名，避免多个待解析群因为同一个占位文案被误合并。
+- 同一 external_id 仍优先按 id 匹配。
+- 同一 external_id 从 unresolved 后续拿到 resolved 可读名时仍可升级显示名。
+- 不同 external_id 即使同为 unresolved / 待解析占位，也会新增为不同本地监控群记录。
 
 ## 测试 / 证据
 
-- 新增专项：`python exit=0 log=.codex_py_logs/py-run-20260520-223701.log`，`tests/test_local_ui_display_contract.py` 5 passed。
-- 相关后端专项：`python exit=0 log=.codex_py_logs/py-run-20260520-224013.log`，96 passed。
-- 全量 pytest：`python exit=0 log=.codex_py_logs/py-run-20260520-224022.log`，142 passed。
+- 最小相关：`python exit=0 log=.codex_py_logs/py-run-20260520-232615.log`，27 passed。
+- 相关后端专项：`python exit=0 log=.codex_py_logs/py-run-20260520-232622.log`，102 passed。
+- 全量 pytest：`python exit=0 log=.codex_py_logs/py-run-20260520-232630.log`，148 passed。
 - `git diff --check`：通过。
 
-## 字段白名单
+## 验收覆盖
 
-- `/api/config-center` forbidden field hit count 不回退：专项测试覆盖 `sqlite_path` / DB path / `member_name_options` / raw payload 类禁字段。
-- 本地 UI 主字段允许本机操作所需可识别文本；状态卡、回报队列、测试日志和 smoke 仍只记录 count / status / 字段存在性 / 布尔结果。
-- 硬禁内容仍不得返回：真实消息正文、候选正文原文证据、真实会话列表、真实成员名单、客户名单、wxid/key/salt、DB path、IP、daemon 原始日志、raw payload。
+- 已有 unresolved session A，再检测不同 external_id 的 unresolved session B：B 会新增，不被占位名误合并。
+- 已有 unresolved 同一 external_id，后续探针拿到 resolved 可读名：显示名会升级。
+- 旧 all_wechat_groups、非群过滤、本地 UI 主显示字段、config-center forbidden 白名单均不回退。
 
 ## 安全边界
 
-- 未新增真实读取。
+- 未执行真实消息读取。
 - 未执行真实 roster 同步。
 - 未手工执行 `wx history/search/export/new-messages`。
 - 未自动外发 / 自动回复。
 - 未写正式日报、正式待办池、Obsidian 正式区或外部系统。
-- 未在状态卡或回报中摘录真实群名、真实消息正文、真实会话、真实成员、客户名单、wxid/key/salt、DB path、IP、daemon 日志。
+- 状态卡和回报不摘录真实群名、真实 id、真实消息、成员名单、客户名单、wxid/key/salt、DB path、IP、daemon 原始日志。
 - `real_read_enabled=false` 保持。
+
+## 是否需要前台配合
+
+- 本次是后端 upsert 去重小修，不需要前台配合。
+- 前台仍需沿用上一棒 unresolved 显示合同：收到待解析状态时展示用户态文案，不用内部 id 兜底标题。
 
 ## 剩余风险
 
-- 本棒未改前台 UI。若 Windows 页面仍显示 safe 字段或旧缓存字段，需要前台/UI做最小返工：改为消费后端主显示字段，safe 字段仅用于回报/诊断。
-- 8765 运行态未在本棒做 HTTP smoke；若监工要求 Windows 实机复验，需要发布/重载后按运行态规则复测。
+- 本棒未做 Windows 运行态重载 / HTTP smoke；发布后仍需 Windows 侧拉取、重启并复验。
+- 若上游探针只给内部标识，页面只能显示待解析状态；真实可读群名仍依赖上游提供可读名称字段。
 
 ## 下一棒建议
 
-- 前台/UI最小复验：确认群管理、消息明细、我方人员、候选审阅页消费主字段而非 safe 字段。
-- 测试审查复核：重点扫本地 UI 主字段可识别、report-safe 字段脱敏、config-center forbidden 字段不回退。
-- Windows 发布前仍需按项目规则核对 Git 发布目录和运行态来源。
+- 监工发布前可合并本小修进同一批提交。
+- 测试审查重点复验 unresolved 不误合并、同 external_id 可升级、config-center forbidden 不回退。
 
 ## 回报投递
 

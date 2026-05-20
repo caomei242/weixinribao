@@ -567,6 +567,94 @@ function customerLabel(value) {
   return value || "待确认客户";
 }
 
+function groupDisplayCandidates(source = {}) {
+  return [
+    source.group_label,
+    source.display_label,
+    source.readable_name,
+    source.group_display_name,
+    source.display_name,
+    source.group_name,
+    source.session_display_name,
+    source.session_name,
+    source.channel_name,
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function groupIdentifierCandidates(source = {}) {
+  return [
+    source.group_id,
+    source.external_id,
+    source.session_id,
+    source.id,
+    source.value,
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function internalGroupIdentifierLike(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  return /@chatroom\b/i.test(text)
+    || /^wxid[_-]/i.test(text)
+    || /^local-monitor-\d+$/i.test(text);
+}
+
+function groupDisplayUnresolved(source = {}) {
+  const statusValues = [
+    source.display_name_status,
+    source.group_name_status,
+    source.group_label_status,
+  ].map((value) => String(value || "").trim());
+  const reasonValues = [
+    source.display_name_reason_code,
+    source.group_name_reason_code,
+    source.group_label_reason_code,
+    source.reason_code,
+  ].map((value) => String(value || "").trim());
+  return statusValues.includes("unresolved")
+    || reasonValues.includes("internal_identifier_only");
+}
+
+function groupDisplayHasInternalCandidate(source = {}) {
+  const identifiers = new Set(groupIdentifierCandidates(source));
+  return groupDisplayCandidates(source).some((value) =>
+    internalGroupIdentifierLike(value) || identifiers.has(value)
+  );
+}
+
+function readableGroupDisplayLabel(source = {}, fallback = "群名待解析") {
+  if (groupDisplayUnresolved(source)) return fallback;
+  const identifiers = new Set(groupIdentifierCandidates(source));
+  const readable = groupDisplayCandidates(source).find((value) =>
+    !internalGroupIdentifierLike(value) && !identifiers.has(value)
+  );
+  if (readable) return readable;
+  return fallback;
+}
+
+function monitorGroupTitle(group = {}) {
+  if (!isSavedMonitorGroup(group) && !group.display_name && !group.group_name) {
+    return "新监控群";
+  }
+  return readableGroupDisplayLabel(group, "群名待解析");
+}
+
+function monitorGroupEditableName(group = {}) {
+  if (groupDisplayUnresolved(group) || groupDisplayHasInternalCandidate(group)) return "";
+  const label = readableGroupDisplayLabel(group, "");
+  return label === "群名待解析" ? "" : label;
+}
+
+function itemGroupContextLabel(item = {}, fallback = "当前候选") {
+  if (groupDisplayUnresolved(item) || groupDisplayHasInternalCandidate(item)) {
+    return "群名待解析";
+  }
+  return readableGroupDisplayLabel(item, "")
+    || item.customer_name
+    || item.channel_name
+    || fallback;
+}
+
 function downstreamLabel(value) {
   return downstreamLabels[value] || "暂不同步";
 }
@@ -1077,11 +1165,10 @@ async function loadMessagesV1(groupId = "all") {
 }
 
 function messageGroupLabel(message) {
-  return message?.group_name
-    || message?.group_display_name
-    || message?.session_display_name
-    || message?.session_name
-    || message?.channel_name
+  if (groupDisplayUnresolved(message) || groupDisplayHasInternalCandidate(message)) {
+    return "群名待解析";
+  }
+  return readableGroupDisplayLabel(message, "")
     || message?.customer_label
     || message?.customer_name
     || "";
@@ -1095,14 +1182,14 @@ function messageGroupOptions() {
   if ((state.messageGroupsV1 || []).length) {
     return state.messageGroupsV1.map((group) => ({
       value: group.group_id || group.group_name || "",
-      label: group.group_name || group.group_id || "未命名监控群",
+      label: readableGroupDisplayLabel(group, "群名待解析"),
       count: group.message_count,
     })).filter((group) => group.value);
   }
   const options = new Map();
   (state.monitorGroups || []).forEach((group) => {
     const value = group.group_id || groupIdentity(group);
-    const label = group.display_name || group.customer_name || value;
+    const label = monitorGroupTitle(group);
     if (value && label) options.set(value, { value, label, count: group.message_count });
   });
   return Array.from(options.values());
@@ -1450,7 +1537,7 @@ async function selectItem(id) {
   document.querySelector("#priority").value = review.priority || "P2";
   document.querySelector("#downstream").value = review.downstream || item.suggested_downstream || "none";
   document.querySelector("#note").value = review.note || "";
-  updateMessageDetailGroupStatus(item.group_name || item.session_display_name || item.customer_name || item.channel_name || "当前候选");
+  updateMessageDetailGroupStatus(itemGroupContextLabel(item, "当前候选"));
 }
 
 function selectRealTrialItem(item) {
@@ -1471,7 +1558,7 @@ function selectRealTrialItem(item) {
   document.querySelector("#note").value = "";
   document.querySelector("#evidence").textContent =
     "来源消息链只在右侧本机显示；确认前可先把本次试读候选加入今天处理，不会自动写入正式日报或外部系统。";
-  updateMessageDetailGroupStatus(item.group_name || item.session_display_name || "最近试读监控群");
+  updateMessageDetailGroupStatus(itemGroupContextLabel(item, "最近试读监控群"));
   loadRealTrialCandidateMessages(item);
 }
 
@@ -1944,7 +2031,15 @@ function normalizeMonitorGroup(session, meta = {}) {
   return {
     group_id: session.group_id || "",
     external_id: session.external_id || makeMonitorGroupId(),
+    group_name: session.group_name || session.display_name || "",
+    group_label: session.group_label || "",
     display_name: session.display_name || session.group_name || "",
+    display_name_status: session.display_name_status || session.group_name_status || "",
+    display_name_reason_code: session.display_name_reason_code || session.group_name_reason_code || "",
+    group_name_status: session.group_name_status || session.display_name_status || "",
+    group_name_reason_code: session.group_name_reason_code || session.display_name_reason_code || "",
+    group_label_status: session.group_label_status || "",
+    group_label_reason_code: session.group_label_reason_code || "",
     customer_id: session.customer_id || session.customer_key || "",
     customer_name: session.customer_name || "",
     customer_label: session.customer_label || session.customer_name || "",
@@ -2002,7 +2097,15 @@ function normalizeMonitorGroupApi(group, detailPayload = {}) {
   return {
     group_id: id,
     external_id: group.external_id || id || makeMonitorGroupId(),
-    display_name: group.group_name || group.display_name || "",
+    group_name: group.group_name || group.display_name || "",
+    group_label: group.group_label || "",
+    display_name: group.display_name || group.group_name || "",
+    display_name_status: group.display_name_status || group.group_name_status || "",
+    display_name_reason_code: group.display_name_reason_code || group.group_name_reason_code || "",
+    group_name_status: group.group_name_status || group.display_name_status || "",
+    group_name_reason_code: group.group_name_reason_code || group.display_name_reason_code || "",
+    group_label_status: group.group_label_status || "",
+    group_label_reason_code: group.group_label_reason_code || "",
     customer_id: group.customer_id || group.customer_key || "",
     customer_name: group.customer_name || "",
     customer_label: group.customer_label || group.customer_name || "",
@@ -2812,7 +2915,7 @@ function renderMemberPool(group, memberOptions) {
 
 function groupCompleteness(group) {
   const required = [
-    group.display_name,
+    monitorGroupEditableName(group),
     group.customer_name,
     group.group_type,
     group.module_name,
@@ -2836,7 +2939,7 @@ function renderMonitoringGroups() {
   }
   const filtered = state.monitorGroups.filter((group) => {
     if (!query) return true;
-    return [group.display_name, group.customer_name, group.owner_name, group.module_name]
+    return [monitorGroupTitle(group), group.customer_name, group.owner_name, group.owner_label, group.module_name]
       .some((value) => String(value || "").includes(query));
   });
   list.innerHTML = filtered.map((group) => {
@@ -2850,7 +2953,7 @@ function renderMonitoringGroups() {
         : "待验证 / 未纳入日报";
     return `
       <button class="monitor-group-card ${groupIdentity(group) === state.selectedMonitorGroupId ? "active" : ""}" data-monitor-group-id="${escapeAttr(groupIdentity(group))}">
-        <strong>${escapeHtml(group.display_name || "未命名监控群")}</strong>
+        <strong>${escapeHtml(monitorGroupTitle(group))}</strong>
         <span>${escapeHtml(group.customer_name || "待选择客户")}｜${escapeHtml(group.group_type || "待选群类型")}</span>
         <small>${escapeHtml(monitorText)}｜${escapeHtml(complete.label)}｜负责人：${escapeHtml(group.owner_name || group.owner_label || "待指定")}</small>
       </button>
@@ -2890,12 +2993,16 @@ function renderMonitorGroupEditor() {
     loadSelectedMonitorGroupDetail(group.group_id);
   }
   const completeness = groupCompleteness(group);
-  title.textContent = group.display_name || "新监控群";
+  const visibleGroupName = monitorGroupTitle(group);
+  const editableGroupName = monitorGroupEditableName(group);
+  title.textContent = visibleGroupName;
   const monitorStatusText = group.archived ? "已归档" : group.enabled === false ? "已停用" : "启用中";
   document.querySelector("#monitorGroupEditorStatus").textContent =
     `${group.verification_status || "待验证"}｜${monitorStatusText}｜试读成功前不会自动纳入日报统计`;
   document.querySelector("#monitorGroupCompleteness").textContent = completeness.label;
-  document.querySelector("#monitorGroupDisplayName").value = group.display_name || "";
+  const displayNameInput = document.querySelector("#monitorGroupDisplayName");
+  displayNameInput.value = editableGroupName;
+  displayNameInput.placeholder = editableGroupName ? "请输入监控群名称" : "待补群名";
   renderCustomerSelect(group);
   renderMonitorGroupOptionStatus(group);
   setOptions(document.querySelector("#monitorGroupType"), fieldOptionValues(["group_types", "group_type_options"], monitorGroupOptions.groupTypes, "group_type"), group.group_type);

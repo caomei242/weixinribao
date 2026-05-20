@@ -80,6 +80,9 @@ class SessionConfig:
     owner_names: list[str] = field(default_factory=list)
     roster_member_names: list[str] = field(default_factory=list)
     archived: bool = False
+    display_name_status: str = "resolved"
+    display_name_source: str = ""
+    display_name_reason_code: str = ""
 
 
 @dataclass
@@ -318,6 +321,13 @@ def load_config(path: Path | str | None = None, root: Path | None = None) -> App
                     item.get("roster_member_names", [])
                 ),
                 archived=_parse_bool(item.get("archived", False)),
+                display_name_status=str(
+                    item.get("display_name_status", "resolved")
+                ),
+                display_name_source=str(item.get("display_name_source", "")),
+                display_name_reason_code=str(
+                    item.get("display_name_reason_code", "")
+                ),
             )
             for item in data.get("sessions", [])
             if item.get("external_id")

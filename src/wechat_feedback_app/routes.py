@@ -80,6 +80,20 @@ ALL_WECHAT_GROUP_SCOPE_ALIASES = {
     "wechat_groups_all",
     "wechatgroupsall",
 }
+GROUP_DISPLAY_PLACEHOLDER = "群名待解析"
+READABLE_SESSION_NAME_KEYS = (
+    "display_name",
+    "name",
+    "nickname",
+    "remark",
+    "title",
+    "alias",
+    "chatroom_name",
+    "group_name",
+    "room_name",
+    "nickName",
+    "remarkName",
+)
 
 
 def create_app(config: AppConfig):
@@ -874,6 +888,22 @@ def daily_followup_items_payload(
         summary_text = local_ui_display_text(item.get("summary") or item.get("title") or "")
         customer_label = local_ui_display_text(item.get("customer_name") or "未标客户")
         module_label = local_ui_display_text(item.get("module_name") or "未标模块")
+        raw_group_label = (
+            item.get("group_name")
+            or item.get("session_display_name")
+            or item.get("session_name")
+        )
+        group_fields = (
+            local_group_display_fields(raw_group_label, source="candidate_item")
+            if clean_text(raw_group_label)
+            else {
+                "group_label": "",
+                "group_label_safe": "",
+                "group_label_status": "not_provided",
+                "group_label_reason_code": "",
+                "group_label_source_error_code": "",
+            }
+        )
         rows.append(
             {
                 "item_id": int(item.get("id") or 0),
@@ -892,6 +922,7 @@ def daily_followup_items_payload(
                 "customer_label_safe": redact_visible_text(customer_label),
                 "module_label": module_label,
                 "module_label_safe": redact_visible_text(module_label),
+                **group_fields,
             }
         )
     return rows
@@ -989,6 +1020,26 @@ def daily_center_today_focus_payload(
                 "summary": local_ui_display_text(item.get("summary") or item.get("title") or ""),
                 "summary_safe": redact_visible_text(
                     item.get("summary") or item.get("title") or ""
+                ),
+                **(
+                    local_group_display_fields(
+                        item.get("group_name")
+                        or item.get("session_display_name")
+                        or item.get("session_name"),
+                        source="candidate_item",
+                    )
+                    if clean_text(
+                        item.get("group_name")
+                        or item.get("session_display_name")
+                        or item.get("session_name")
+                    )
+                    else {
+                        "group_label": "",
+                        "group_label_safe": "",
+                        "group_label_status": "not_provided",
+                        "group_label_reason_code": "",
+                        "group_label_source_error_code": "",
+                    }
                 ),
                 "home_status_label": candidate_home_status_label(item, set()),
                 "action_label": candidate_home_action_label(
@@ -2269,6 +2320,22 @@ def build_candidate_inbox_items(
         in_draft = item_id in drafted_item_ids
         title = local_ui_display_text(item.get("title"))
         summary = local_ui_display_text(item.get("summary") or item.get("title") or "")
+        raw_group_label = (
+            item.get("group_name")
+            or item.get("session_display_name")
+            or item.get("session_name")
+        )
+        group_fields = (
+            local_group_display_fields(raw_group_label, source="candidate_item")
+            if clean_text(raw_group_label)
+            else {
+                "group_label": "",
+                "group_label_safe": "",
+                "group_label_status": "not_provided",
+                "group_label_reason_code": "",
+                "group_label_source_error_code": "",
+            }
+        )
         human_items.append(
             {
                 "id": item_id,
@@ -2280,6 +2347,7 @@ def build_candidate_inbox_items(
                 "title": title,
                 "summary": summary,
                 "summary_safe": redact_visible_text(summary),
+                **group_fields,
                 "reason_safe": human_candidate_reason(item, source, in_draft),
                 "risk_label": human_candidate_risk_label(item),
                 "owner_label": human_candidate_owner_label(item),
@@ -2575,10 +2643,16 @@ def monitor_group_customer_suggestion_payload(
         config, strawberry_loader=strawberry_loader
     )
     customer_options = customer_data["options"]
-    suggestion = customer_suggestion_from_options(group_name, customer_options)
+    group_meta = local_group_display_meta(group_name, source="suggestion_query")
+    suggestion = customer_suggestion_from_options(
+        group_meta["value"] if group_meta["status"] == "resolved" else "",
+        customer_options,
+    )
     return {
         "status": "ok",
         "query_configured": bool(clean_text(group_name)),
+        "query_display_status": group_meta["status"],
+        "query_reason_code": group_meta["reason_code"],
         "customer_options_count": len(customer_options),
         "customer_source_status": customer_data["source_status"],
         "customer_source_error_code": customer_data["source_error_code"],
@@ -2631,6 +2705,7 @@ def monitor_group_detail_payload(
         return {"status": "not_found", "group": {}}
     member_options = monitor_group_member_options(conn, session, config)
     field_options = monitor_group_field_options(config)
+    group_meta = local_group_display_meta(session.display_name)
     return {
         "status": "ok",
         "group": monitor_group_public_payload(
@@ -2644,7 +2719,8 @@ def monitor_group_detail_payload(
         "owner_options": field_options["owners"],
         "module_options": field_options["modules"],
         "customer_suggestion": customer_suggestion_payload(
-            session.display_name, config
+            group_meta["value"] if group_meta["status"] == "resolved" else "",
+            config,
         ),
         "member_options": member_options,
         "member_name_options": member_options["names"],
@@ -2842,18 +2918,23 @@ def save_monitor_group_payload(
             "error_code": "monitor_group_name_required",
             "group": {},
         }
+    group_meta = local_group_display_meta(group_name, source="user_input")
+    display_name_for_save = group_meta["value"]
     if session is None:
-        session = find_monitor_group_by_name(config, group_name)
+        session = find_monitor_group_by_name(config, display_name_for_save)
     created = session is None
     if session is None:
         session = SessionConfig(
             external_id=local_monitor_external_id(group_name),
-            display_name=group_name,
+            display_name=display_name_for_save,
         )
         config.sessions.append(session)
 
     customer_options = customer_options_payload(config)
-    customer_suggestion = customer_suggestion_from_options(group_name, customer_options)
+    customer_suggestion = customer_suggestion_from_options(
+        display_name_for_save if group_meta["status"] == "resolved" else "",
+        customer_options,
+    )
     selected_customer = resolve_customer_selection(payload, customer_options)
     customer_name = selected_customer["customer_name"] or clean_text(
         payload.get("customer_name")
@@ -2861,7 +2942,10 @@ def save_monitor_group_payload(
     if not customer_name and customer_suggestion["match_status"] == "matched":
         customer_name = customer_suggestion["suggested_customer_name"]
 
-    session.display_name = group_name
+    session.display_name = display_name_for_save
+    session.display_name_status = group_meta["status"]
+    session.display_name_source = group_meta["source"]
+    session.display_name_reason_code = group_meta["reason_code"]
     session.customer_name = customer_name
     session.channel_name = clean_text(payload.get("channel_name"))
     session.module_name = clean_text(payload.get("module_name"))
@@ -3049,7 +3133,12 @@ def monitor_group_public_payload(
     verification = safe_verification_status(session.verification_status)
     counts = monitor_group_counts_in_daily_center(session)
     archived = bool(getattr(session, "archived", False))
-    group_name = local_ui_display_text(session.display_name)
+    group_meta = local_group_display_meta(
+        session.display_name,
+        source=clean_text(getattr(session, "display_name_source", ""))
+        or "config_display_name",
+    )
+    group_name = group_meta["value"]
     customer_name = local_ui_display_text(session.customer_name)
     group_type = local_ui_display_text(session.group_type)
     module_name = local_ui_display_text(session.module_name)
@@ -3059,8 +3148,15 @@ def monitor_group_public_payload(
         "group_id": monitor_group_public_id(session),
         "display_name": group_name,
         "display_name_safe": redact_visible_text(group_name),
+        "display_name_status": group_meta["status"],
+        "display_name_source": group_meta["source"],
+        "display_name_reason_code": group_meta["reason_code"],
+        "display_name_source_error_code": group_meta["source_error_code"],
         "group_name": group_name,
         "group_name_safe": redact_visible_text(group_name),
+        "group_name_status": group_meta["status"],
+        "group_name_reason_code": group_meta["reason_code"],
+        "group_name_source_error_code": group_meta["source_error_code"],
         "redacted_group_label": redact_visible_text(group_name),
         "archived": archived,
         "enabled": bool(session.enabled),
@@ -3078,7 +3174,11 @@ def monitor_group_public_payload(
         "customer_name": customer_name,
         "customer_name_safe": redact_visible_text(customer_name),
         "customer_id": local_customer_id(session.customer_name),
-        "customer_match": customer_suggestion_payload(session.display_name, None, [session.customer_name]),
+        "customer_match": customer_suggestion_payload(
+            group_name if group_meta["status"] == "resolved" else "",
+            None,
+            [session.customer_name],
+        ),
         "group_type": group_type,
         "group_type_safe": redact_visible_text(group_type),
         "module_name": module_name,
@@ -4517,8 +4617,20 @@ def recent_appearance_payload(
     groups = [
         {
             "group_id": f"mg-{hashlib.sha256(str(row['external_id']).encode('utf-8')).hexdigest()[:12]}",
-            "group_name": clean_text(row["display_name"]),
-            "group_name_safe": redact_visible_text(row["display_name"]),
+            "group_name": local_group_display_meta(
+                row["display_name"], source="recent_appearance"
+            )["value"],
+            "group_name_safe": redact_visible_text(
+                local_group_display_meta(row["display_name"], source="recent_appearance")[
+                    "value"
+                ]
+            ),
+            "group_name_status": local_group_display_meta(
+                row["display_name"], source="recent_appearance"
+            )["status"],
+            "group_name_reason_code": local_group_display_meta(
+                row["display_name"], source="recent_appearance"
+            )["reason_code"],
             "message_count": int(row["message_count"] or 0),
         }
         for row in rows
@@ -4754,7 +4866,8 @@ def messages_v1_payload(
     for row in rows:
         row_group_id = f"mg-{hashlib.sha256(str(row['external_id']).encode('utf-8')).hexdigest()[:12]}"
         ref = f"m-{int(row['id']):04d}"
-        group_name = local_ui_display_text(row["display_name"])
+        group_meta = local_group_display_meta(row["display_name"], source="message_session")
+        group_name = group_meta["value"]
         customer_label = local_ui_display_text(row["customer_name"] or "未标客户")
         module_label = local_ui_display_text(row["module_name"] or "未标模块")
         messages.append(
@@ -4764,6 +4877,9 @@ def messages_v1_payload(
                 "group_id": row_group_id,
                 "group_name": group_name,
                 "group_name_safe": redact_visible_text(group_name),
+                "group_name_status": group_meta["status"],
+                "group_name_reason_code": group_meta["reason_code"],
+                "group_name_source_error_code": group_meta["source_error_code"],
                 "customer_label": customer_label,
                 "customer_label_safe": redact_visible_text(customer_label),
                 "module_label": module_label,
@@ -4832,7 +4948,12 @@ def message_group_options(
         }
     ]
     for session in config.sessions:
-        group_name = local_ui_display_text(session.display_name)
+        group_meta = local_group_display_meta(
+            session.display_name,
+            source=clean_text(getattr(session, "display_name_source", ""))
+            or "config_display_name",
+        )
+        group_name = group_meta["value"]
         customer_label = local_ui_display_text(session.customer_name or "未标客户")
         module_label = local_ui_display_text(session.module_name or "未标模块")
         groups.append(
@@ -4840,6 +4961,10 @@ def message_group_options(
                 "group_id": monitor_group_public_id(session),
                 "group_name": group_name,
                 "group_name_safe": redact_visible_text(group_name),
+                "display_name_status": group_meta["status"],
+                "group_name_status": group_meta["status"],
+                "group_name_reason_code": group_meta["reason_code"],
+                "group_name_source_error_code": group_meta["source_error_code"],
                 "customer_label": customer_label,
                 "customer_label_safe": redact_visible_text(customer_label),
                 "module_label": module_label,
@@ -5131,9 +5256,18 @@ def config_center_session_payload(
     config: AppConfig | None = None,
 ) -> dict[str, Any]:
     member_options = monitor_group_member_options(conn, session, config)
+    group_meta = local_group_display_meta(
+        session.display_name,
+        source=clean_text(getattr(session, "display_name_source", ""))
+        or "config_display_name",
+    )
     return {
         "external_id": session.external_id,
-        "display_name": session.display_name,
+        "display_name": group_meta["value"],
+        "display_name_status": group_meta["status"],
+        "display_name_source": group_meta["source"],
+        "display_name_reason_code": group_meta["reason_code"],
+        "display_name_source_error_code": group_meta["source_error_code"],
         "customer_name": session.customer_name,
         "channel_name": session.channel_name,
         "module_name": session.module_name,
@@ -5155,7 +5289,8 @@ def config_center_session_payload(
         "customer_options": customer_options_payload(config) if config else [],
         "customer_options_count": len(customer_options_payload(config)) if config else 0,
         "customer_suggestion": customer_suggestion_payload(
-            session.display_name, config
+            group_meta["value"] if group_meta["status"] == "resolved" else "",
+            config,
         ),
         "member_options": monitor_group_member_options_summary(member_options),
         "member_options_detail_endpoint": f"/api/monitor-groups/{monitor_group_public_id(session)}",
@@ -5198,6 +5333,13 @@ def save_config_center_payload(
                 internal_people=clean_text_list(item.get("internal_people")),
                 roster_member_names=clean_text_list(item.get("roster_member_names")),
                 archived=parse_bool(item.get("archived"), False),
+                display_name_status=clean_text(item.get("display_name_status"))
+                or local_group_display_meta(item.get("display_name"))["status"],
+                display_name_source=clean_text(item.get("display_name_source")),
+                display_name_reason_code=clean_text(
+                    item.get("display_name_reason_code")
+                )
+                or local_group_display_meta(item.get("display_name"))["reason_code"],
             )
             for item in sessions_payload
             if isinstance(item, dict)
@@ -5942,7 +6084,7 @@ def is_detected_wechat_group_session(item: dict[str, Any]) -> bool:
         "conversation_id",
         "session_id",
     )
-    display = session_probe_text(item, "display_name", "name", "nickname", "remark")
+    display = session_probe_text(item, *READABLE_SESSION_NAME_KEYS)
     identifier_text = identifier.lower()
     display_text = display.lower()
     haystack = f"{type_text} {identifier_text} {display_text}".lower()
@@ -5999,26 +6141,31 @@ def detected_group_identifier(item: dict[str, Any], index: int) -> str:
         "chat_id",
         "conversation_id",
         "session_id",
-    ) or session_probe_text(item, "display_name", "name", "nickname", "remark")
+    ) or session_probe_text(item, *READABLE_SESSION_NAME_KEYS)
     digest = hashlib.sha256((raw or f"detected-{index}").encode("utf-8")).hexdigest()[:12]
     return f"detected-wechat-group-{digest}"
 
 
-def detected_group_display_name(item: dict[str, Any], index: int) -> str:
-    return (
-        session_probe_text(item, "display_name", "name", "nickname", "remark")
-        or session_probe_text(
-            item,
-            "id",
-            "external_id",
-            "username",
-            "room_id",
-            "chat_id",
-            "conversation_id",
-            "session_id",
-        )
-        or f"微信群-{index + 1}"
-    )
+def detected_group_readable_display_name(item: dict[str, Any]) -> tuple[str, str]:
+    for key in READABLE_SESSION_NAME_KEYS:
+        value = clean_text(item.get(key))
+        if value and not is_internal_identifier_for_display(value):
+            return value, key
+    return "", ""
+
+
+def detected_group_display_meta(item: dict[str, Any], index: int) -> dict[str, str]:
+    del index
+    display, source = detected_group_readable_display_name(item)
+    if display:
+        return local_group_display_meta(display, source=source)
+    return {
+        "value": GROUP_DISPLAY_PLACEHOLDER,
+        "status": "unresolved",
+        "reason_code": "internal_identifier_only",
+        "source_error_code": "group_display_name_unresolved",
+        "source": "session_probe",
+    }
 
 
 def detected_wechat_group_sessions(payload: Any) -> tuple[list[SessionConfig], dict[str, Any]]:
@@ -6032,10 +6179,11 @@ def detected_wechat_group_sessions(payload: Any) -> tuple[list[SessionConfig], d
         if external_id in seen:
             continue
         seen.add(external_id)
+        display_meta = detected_group_display_meta(item, index)
         selected.append(
             SessionConfig(
                 external_id=external_id,
-                display_name=detected_group_display_name(item, index),
+                display_name=display_meta["value"],
                 group_type="微信群",
                 is_whitelisted=False,
                 enabled=True,
@@ -6043,6 +6191,9 @@ def detected_wechat_group_sessions(payload: Any) -> tuple[list[SessionConfig], d
                 daily_monitor_enabled=False,
                 include_in_daily=False,
                 trial_scope="全部微信群首跑",
+                display_name_status=display_meta["status"],
+                display_name_source=display_meta["source"],
+                display_name_reason_code=display_meta["reason_code"],
             )
         )
     summary = {
@@ -6051,6 +6202,13 @@ def detected_wechat_group_sessions(payload: Any) -> tuple[list[SessionConfig], d
         "detected_session_count": len(items),
         "detected_group_count": len(selected),
         "excluded_non_group_count": max(0, len(items) - len(selected)),
+        "unresolved_display_name_count": len(
+            [
+                session
+                for session in selected
+                if getattr(session, "display_name_status", "") == "unresolved"
+            ]
+        ),
         "groups_returned": False,
         "session_names_returned": False,
     }
@@ -6093,15 +6251,37 @@ def probe_wechat_group_sessions(
 
 def upsert_detected_monitor_groups(config: AppConfig, sessions: list[SessionConfig]) -> int:
     by_id = {session.external_id: session for session in config.sessions}
-    by_name = {session.display_name: session for session in config.sessions}
+    by_name = {
+        session.display_name: session
+        for session in config.sessions
+        if local_group_display_meta(session.display_name)["status"] == "resolved"
+        and clean_text(getattr(session, "display_name_status", "resolved")) != "unresolved"
+    }
     inserted = 0
+    updated = 0
     for detected in sessions:
-        existing = by_id.get(detected.external_id) or by_name.get(detected.display_name)
+        detected_meta = local_group_display_meta(detected.display_name)
+        name_match = (
+            by_name.get(detected.display_name)
+            if detected_meta["status"] == "resolved"
+            else None
+        )
+        existing = by_id.get(detected.external_id) or name_match
         if existing is not None:
+            existing_meta = local_group_display_meta(existing.display_name)
+            if (
+                existing_meta["status"] == "unresolved"
+                and detected_meta["status"] == "resolved"
+            ):
+                existing.display_name = detected.display_name
+                existing.display_name_status = detected.display_name_status
+                existing.display_name_source = detected.display_name_source
+                existing.display_name_reason_code = detected.display_name_reason_code
+                updated += 1
             continue
         config.sessions.append(detected)
         inserted += 1
-    if inserted:
+    if inserted or updated:
         write_config_center_yaml(config)
     return inserted
 
@@ -7022,6 +7202,17 @@ def write_config_center_yaml(config: AppConfig) -> None:
             {
                 "external_id": session.external_id,
                 "display_name": session.display_name,
+                "display_name_status": getattr(
+                    session,
+                    "display_name_status",
+                    local_group_display_meta(session.display_name)["status"],
+                ),
+                "display_name_source": getattr(session, "display_name_source", ""),
+                "display_name_reason_code": getattr(
+                    session,
+                    "display_name_reason_code",
+                    local_group_display_meta(session.display_name)["reason_code"],
+                ),
                 "customer_name": session.customer_name,
                 "channel_name": session.channel_name,
                 "module_name": session.module_name,
@@ -7111,6 +7302,80 @@ def local_ui_display_text(value: Any) -> str:
 
 def local_ui_display_list(values: list[Any]) -> list[str]:
     return unique_clean_text([local_ui_display_text(value) for value in values])
+
+
+def is_internal_identifier_for_display(value: Any) -> bool:
+    text = clean_text(value)
+    if not text:
+        return True
+    if text == GROUP_DISPLAY_PLACEHOLDER:
+        return True
+    lowered = text.lower()
+    if "@chatroom" in lowered:
+        return True
+    if lowered.startswith("wxid_") or lowered.startswith("gh_"):
+        return True
+    if lowered in {"filehelper", "文件传输助手"}:
+        return True
+    if any(token in lowered for token in ("key", "salt", "daemon", "raw_payload")):
+        return True
+    if re.search(r"(?i)\b[A-Z]:\\", text) or re.search(
+        r"/(?:Users|private|var|tmp|Applications|Volumes)/", text
+    ):
+        return True
+    if re.fullmatch(r"\d{6,}", text):
+        return True
+    if re.fullmatch(r"[a-f0-9]{12,64}", lowered):
+        return True
+    if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{13,}", lowered):
+        return True
+    if re.fullmatch(r"(?:detected-wechat-group|local-monitor)-[a-f0-9]{8,}", lowered):
+        return True
+    return False
+
+
+def local_group_display_meta(value: Any, *, source: str = "config_display_name") -> dict[str, str]:
+    raw = clean_text(value)
+    display = local_ui_display_text(raw)
+    if not raw:
+        return {
+            "value": GROUP_DISPLAY_PLACEHOLDER,
+            "status": "unresolved",
+            "reason_code": "empty_display_name",
+            "source_error_code": "group_display_name_unresolved",
+            "source": source,
+        }
+    if (
+        is_internal_identifier_for_display(raw)
+        or is_internal_identifier_for_display(display)
+        or "[敏感信息已脱敏]" in display
+        or "[路径已脱敏]" in display
+    ):
+        return {
+            "value": GROUP_DISPLAY_PLACEHOLDER,
+            "status": "unresolved",
+            "reason_code": "internal_identifier_only",
+            "source_error_code": "group_display_name_unresolved",
+            "source": source,
+        }
+    return {
+        "value": display,
+        "status": "resolved",
+        "reason_code": "",
+        "source_error_code": "",
+        "source": source,
+    }
+
+
+def local_group_display_fields(value: Any, *, source: str = "config_display_name") -> dict[str, str]:
+    meta = local_group_display_meta(value, source=source)
+    return {
+        "group_label": meta["value"],
+        "group_label_safe": redact_visible_text(meta["value"]),
+        "group_label_status": meta["status"],
+        "group_label_reason_code": meta["reason_code"],
+        "group_label_source_error_code": meta["source_error_code"],
+    }
 
 
 def now_local_iso() -> str:
