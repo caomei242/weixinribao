@@ -21,6 +21,12 @@ wx_cli:
   expanded_real_max_total_messages: 5000
   expanded_real_max_messages_per_group: 500
   expanded_real_batch_limit: 1
+  persistent_real_read_enabled: false
+  persistent_real_read_paused: false
+  persistent_real_read_test_account_confirmed: false
+  persistent_real_read_schedule_enabled: false
+  persistent_real_read_interval_minutes: 60
+  persistent_real_read_default_lookback_days: 30
 
 collector:
   interval_minutes: 60

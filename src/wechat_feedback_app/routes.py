@@ -409,6 +409,10 @@ def create_app(config: AppConfig):
     def real_trial_sender_map(payload: dict[str, Any]):
         return save_sender_mapping_payload(conn, payload)
 
+    @app.post("/api/real-trial/persistent-control")
+    def real_trial_persistent_control(payload: Optional[dict[str, Any]] = None):
+        return persistent_real_read_control_payload(config, payload or {}, conn)
+
     @app.get("/api/config-center")
     def config_center():
         return config_center_payload(config, conn)
@@ -1554,6 +1558,7 @@ def safe_status_payload(config: AppConfig) -> dict[str, Any]:
                 LEGACY_REAL_TRIAL_MAX_LIMIT,
             ),
             "expanded_trial": expanded_real_trial_contract_payload(config),
+            "persistent_authorization": persistent_real_read_contract_payload(config),
         },
     }
 
@@ -1589,6 +1594,7 @@ def safe_config_payload(config: AppConfig) -> dict[str, Any]:
                 LEGACY_REAL_TRIAL_MAX_LIMIT,
             ),
             "expanded_trial": expanded_real_trial_contract_payload(config),
+            "persistent_authorization": persistent_real_read_contract_payload(config),
         },
         "collector": {
             "interval_minutes": config.collector.interval_minutes,
@@ -1664,6 +1670,28 @@ def latest_real_trial_payload(config: AppConfig) -> dict[str, Any]:
         "sqlite_exists": latest_db.exists(),
         "export_directory": relative_to_root(config, export_dir),
         "export_directory_exists": export_dir.exists(),
+    }
+
+
+def latest_real_trial_config_center_summary(config: AppConfig) -> dict[str, Any]:
+    latest = latest_real_trial_payload(config)
+    return {
+        "status": latest.get("status", "not_found"),
+        "mode": latest.get("mode", "real"),
+        "source_label": latest.get("source_label", ""),
+        "trial_finished_at": latest.get("trial_finished_at", ""),
+        "current_service_mode": latest.get("current_service_mode", config.wx_cli.mode),
+        "current_service_is_real": bool(latest.get("current_service_is_real")),
+        "default_real_read_enabled": bool(latest.get("default_real_read_enabled")),
+        "fixture_service_notice": bool(latest.get("fixture_service_notice")),
+        "raw_count": int(latest.get("raw_count") or 0),
+        "candidate_count": int(latest.get("candidate_count") or 0),
+        "risk_count": int(latest.get("risk_count") or 0),
+        "candidate_status_counts": latest.get("candidate_status_counts", {}),
+        "sqlite_exists": bool(latest.get("sqlite_exists")),
+        "export_directory_exists": bool(latest.get("export_directory_exists")),
+        "path_fields_returned": False,
+        "read_shape": latest.get("read_shape", {}),
     }
 
 
@@ -4926,7 +4954,8 @@ def config_center_payload(
             "real_read_enabled": bool(config.wx_cli.real_read_enabled),
             "wx_cli_status": readiness["status"],
             "enabled_whitelist_count": enabled_whitelist_count,
-            "latest_trial": latest_real_trial_payload(config),
+            "latest_trial": latest_real_trial_config_center_summary(config),
+            "persistent_authorization": persistent_real_read_contract_payload(config),
         },
         "editable": {
             "sessions": [
@@ -4966,6 +4995,7 @@ def config_center_payload(
                 "start_at": config.wx_cli.real_start_at,
                 "end_at": config.wx_cli.real_end_at,
                 "expanded_trial": expanded_real_trial_contract_payload(config),
+                "persistent_authorization": persistent_real_read_contract_payload(config),
             },
         },
         "customer_options": customer_options,
@@ -4981,6 +5011,7 @@ def config_center_payload(
             "max_lookback_hours": LEGACY_REAL_TRIAL_MAX_LOOKBACK_HOURS,
             "requires_single_enabled_whitelist": True,
             "expanded_trial": expanded_real_trial_contract_payload(config),
+            "persistent_real_read": persistent_real_read_contract_payload(config),
             "fixture_service_notice": config.wx_cli.mode != "real",
         },
         "save_target": "config/app.yaml",
@@ -5012,7 +5043,6 @@ def config_center_session_payload(
         "include_in_daily": bool(session.include_in_daily),
         "trial_scope": session.trial_scope,
         "internal_people": list(session.internal_people),
-        "roster_member_names": list(getattr(session, "roster_member_names", []) or []),
         "archived": bool(getattr(session, "archived", False)),
         "customer_id": local_customer_id(session.customer_name),
         "customer_options": customer_options_payload(config) if config else [],
@@ -5020,8 +5050,9 @@ def config_center_session_payload(
         "customer_suggestion": customer_suggestion_payload(
             session.display_name, config
         ),
-        "member_options": member_options,
-        "member_name_options": member_options["names"],
+        "member_options": monitor_group_member_options_summary(member_options),
+        "member_options_detail_endpoint": f"/api/monitor-groups/{monitor_group_public_id(session)}",
+        "member_list_returned": False,
     }
 
 
@@ -5152,6 +5183,77 @@ def save_config_center_payload(
             default=CONFIGURABLE_REAL_TRIAL_DEFAULT_BATCH_LIMIT,
         )
 
+    persistent_defaults = payload.get("persistent_real_read", {})
+    if not isinstance(persistent_defaults, dict) or not persistent_defaults:
+        persistent_defaults = payload.get("persistent_authorization", {})
+    if not isinstance(persistent_defaults, dict) or not persistent_defaults:
+        persistent_defaults = (
+            trial_defaults.get("persistent_real_read", {})
+            if isinstance(trial_defaults, dict)
+            else {}
+        )
+    if not isinstance(persistent_defaults, dict) or not persistent_defaults:
+        persistent_defaults = (
+            trial_defaults.get("persistent_authorization", {})
+            if isinstance(trial_defaults, dict)
+            else {}
+        )
+    if isinstance(persistent_defaults, dict) and persistent_defaults:
+        config.wx_cli.persistent_real_read_enabled = parse_bool(
+            persistent_defaults.get(
+                "enabled",
+                persistent_defaults.get("persistent_real_read_enabled"),
+            ),
+            bool(getattr(config.wx_cli, "persistent_real_read_enabled", False)),
+        )
+        config.wx_cli.persistent_real_read_paused = parse_bool(
+            persistent_defaults.get(
+                "paused",
+                persistent_defaults.get("persistent_real_read_paused"),
+            ),
+            bool(getattr(config.wx_cli, "persistent_real_read_paused", False)),
+        )
+        config.wx_cli.persistent_real_read_test_account_confirmed = parse_bool(
+            persistent_defaults.get(
+                "test_account_confirmed",
+                persistent_defaults.get("test_wechat_account_confirmed"),
+            ),
+            bool(
+                getattr(
+                    config.wx_cli,
+                    "persistent_real_read_test_account_confirmed",
+                    False,
+                )
+            ),
+        )
+        config.wx_cli.persistent_real_read_schedule_enabled = parse_bool(
+            persistent_defaults.get(
+                "schedule_enabled",
+                persistent_defaults.get("persistent_real_read_schedule_enabled"),
+            ),
+            bool(
+                getattr(config.wx_cli, "persistent_real_read_schedule_enabled", False)
+            ),
+        )
+        config.wx_cli.persistent_real_read_interval_minutes = clamp_int(
+            persistent_defaults.get(
+                "interval_minutes",
+                persistent_defaults.get("schedule_interval_minutes"),
+            ),
+            minimum=5,
+            maximum=24 * 60,
+            default=persistent_real_read_interval_minutes(config),
+        )
+        config.wx_cli.persistent_real_read_default_lookback_days = clamp_float(
+            persistent_defaults.get(
+                "default_lookback_days",
+                persistent_defaults.get("lookback_days"),
+            ),
+            minimum=1,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_SAFETY_DAYS,
+            default=persistent_real_read_default_lookback_days(config),
+        )
+
     config.wx_cli.real_read_enabled = False
     write_config_center_yaml(config)
     return {
@@ -5197,6 +5299,24 @@ def expanded_real_trial_caps(config: AppConfig) -> dict[str, Any]:
     }
 
 
+def persistent_real_read_interval_minutes(config: AppConfig) -> int:
+    return clamp_int(
+        getattr(config.wx_cli, "persistent_real_read_interval_minutes", 60),
+        minimum=5,
+        maximum=24 * 60,
+        default=60,
+    )
+
+
+def persistent_real_read_default_lookback_days(config: AppConfig) -> float:
+    return clamp_float(
+        getattr(config.wx_cli, "persistent_real_read_default_lookback_days", 30),
+        minimum=1,
+        maximum=CONFIGURABLE_REAL_TRIAL_HARD_SAFETY_DAYS,
+        default=30,
+    )
+
+
 def expanded_real_trial_contract_payload(config: AppConfig) -> dict[str, Any]:
     caps = expanded_real_trial_caps(config)
     return {
@@ -5228,6 +5348,71 @@ def expanded_real_trial_contract_payload(config: AppConfig) -> dict[str, Any]:
             "batch_limit": "wx_cli.expanded_real_batch_limit",
         },
     }
+
+
+def persistent_real_read_contract_payload(config: AppConfig) -> dict[str, Any]:
+    caps = expanded_real_trial_caps(config)
+    enabled = bool(getattr(config.wx_cli, "persistent_real_read_enabled", False))
+    paused = bool(getattr(config.wx_cli, "persistent_real_read_paused", False))
+    schedule_enabled = bool(
+        getattr(config.wx_cli, "persistent_real_read_schedule_enabled", False)
+    )
+    default_lookback = persistent_real_read_default_lookback_days(config)
+    return {
+        "supported": True,
+        "authorization_mode": "persistent",
+        "enabled": enabled,
+        "paused": paused,
+        "status": "paused" if enabled and paused else ("enabled" if enabled else "disabled"),
+        "status_label": (
+            "已暂停长期真实读取"
+            if enabled and paused
+            else ("已开启长期真实读取授权" if enabled else "长期真实读取默认关闭")
+        ),
+        "test_account_confirmed": bool(
+            getattr(config.wx_cli, "persistent_real_read_test_account_confirmed", False)
+        ),
+        "trigger_modes": ["manual", "scheduled"],
+        "manual_trigger_enabled": enabled and not paused,
+        "schedule_enabled": schedule_enabled,
+        "interval_minutes": persistent_real_read_interval_minutes(config),
+        "default_lookback_days": default_lookback,
+        "max_allowed_lookback_days": caps["max_allowed_lookback_days"],
+        "max_groups": caps["max_groups"],
+        "max_total_messages": caps["max_total_messages"],
+        "max_messages_per_group": caps["max_messages_per_group"],
+        "batch_limit": caps["batch_limit"],
+        "multi_group_supported": True,
+        "uses_enabled_whitelist_only": True,
+        "writes_local_raw_normalized_candidate": True,
+        "formal_write_enabled": False,
+        "no_external_send": True,
+        "no_auto_reply": True,
+        "will_execute_without_persistent_authorization": False,
+        "returns_sensitive_details": False,
+        "real_read_enabled_after": False,
+        "windows_config_fields": {
+            "enabled": "wx_cli.persistent_real_read_enabled",
+            "paused": "wx_cli.persistent_real_read_paused",
+            "test_account_confirmed": "wx_cli.persistent_real_read_test_account_confirmed",
+            "schedule_enabled": "wx_cli.persistent_real_read_schedule_enabled",
+            "interval_minutes": "wx_cli.persistent_real_read_interval_minutes",
+            "default_lookback_days": "wx_cli.persistent_real_read_default_lookback_days",
+            "max_allowed_lookback_days": "wx_cli.expanded_real_lookback_days",
+        },
+    }
+
+
+def normalized_authorization_mode(payload: dict[str, Any]) -> str:
+    raw = clean_text(
+        payload.get("authorization_mode")
+        or payload.get("auth_mode")
+        or payload.get("real_read_authorization_mode")
+    )
+    normalized = raw.lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"persistent", "persistent_real_read", "long_term", "longterm"}:
+        return "persistent"
+    return "one_time"
 
 
 def normalized_real_trial_scope_mode(payload: dict[str, Any]) -> str:
@@ -5484,6 +5669,8 @@ def execute_configurable_real_trial_once(
     selected_sessions: list[SessionConfig],
     window_summary: dict[str, Any],
     limits: dict[str, int],
+    *,
+    collection_mode: str = "real_trial_once",
 ) -> dict[str, Any]:
     if conn is None:
         return {
@@ -5561,7 +5748,7 @@ def execute_configurable_real_trial_once(
         config,
         conn,
         messages,
-        mode="real_trial_once",
+        mode=collection_mode,
     )
     summary = execution_summary_from_result(collected)
     summary["sessions_total"] = len(selected_sessions)
@@ -5570,6 +5757,405 @@ def execute_configurable_real_trial_once(
     summary["status"] = "partial_failed" if failed else summary["status"]
     summary["error_code"] = "real_trial_partial_failed" if failed else summary["error_code"]
     return summary
+
+
+def persistent_real_read_blocked(
+    error_code: str,
+    message: str,
+    *,
+    selected_group_count: int = 0,
+    window_summary: dict[str, Any] | None = None,
+    trigger: str = "manual",
+) -> dict[str, Any]:
+    window_summary = window_summary or {}
+    return {
+        "status": "blocked",
+        "authorization_mode": "persistent",
+        "trigger": trigger,
+        "will_run": False,
+        "real_read_enabled": False,
+        "real_read_enabled_after": False,
+        "error_code": error_code,
+        "reason_code": error_code,
+        "message": message,
+        "scope": {
+            "scope_mode": "configurable_window",
+            "authorization_mode": "persistent",
+            "trigger": trigger,
+            "selected_group_count": selected_group_count,
+            "groups_returned": False,
+            "session_names_returned": False,
+            **window_summary,
+        },
+        "limits": window_summary,
+        "execution": {
+            "entry_opened": False,
+            "authorization_mode": "persistent",
+            "persistent_authorization_enabled": False,
+            "will_execute_wx_history": False,
+            "will_execute_wx_search": False,
+            "will_execute_wx_export": False,
+            "will_execute_wx_new_messages": False,
+            "no_real_read_executed": True,
+            "real_read_enabled_after": False,
+        },
+        "execution_summary": {
+            "status": "blocked",
+            "error_code": error_code,
+            "sessions_total": selected_group_count,
+            "sessions_success": 0,
+            "sessions_failed": selected_group_count,
+            "raw_messages_seen": 0,
+            "raw_messages_inserted": 0,
+            "raw_messages_duplicated": 0,
+            "candidate_items_created": 0,
+            "candidate_items_updated": 0,
+        },
+        "failure_summary": {
+            "status": "blocked",
+            "error_code": error_code,
+            "error_count": 1,
+            "failed_group_count": selected_group_count,
+            "details_returned": False,
+        },
+    }
+
+
+def persistent_real_read_trigger(payload: dict[str, Any]) -> str:
+    raw = clean_text(payload.get("trigger") or payload.get("trigger_type") or "manual")
+    normalized = raw.lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"schedule", "scheduled", "timer", "interval"}:
+        return "scheduled"
+    return "manual" if normalized in {"", "manual", "run_now", "once"} else normalized
+
+
+def enabled_whitelist_sessions(config: AppConfig) -> list[SessionConfig]:
+    return [
+        session
+        for session in config.sessions
+        if session.enabled
+        and session.is_whitelisted
+        and not getattr(session, "archived", False)
+    ]
+
+
+def persistent_selected_sessions(
+    config: AppConfig, payload: dict[str, Any]
+) -> tuple[list[SessionConfig], int, bool]:
+    enabled_whitelist = enabled_whitelist_sessions(config)
+    tokens = requested_group_tokens(payload)
+    include_all = parse_bool(payload.get("include_all_enabled_whitelist"), not tokens)
+    if tokens and not include_all:
+        token_set = set(tokens)
+        selected = [
+            session
+            for session in enabled_whitelist
+            if session.external_id in token_set or session.display_name in token_set
+        ]
+        return selected, len(tokens), len(selected) == len(tokens)
+    return enabled_whitelist, len(enabled_whitelist), True
+
+
+def persistent_real_read_run_plan(
+    config: AppConfig,
+    payload: dict[str, Any],
+    conn: sqlite3.Connection | None = None,
+    executor: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    trigger = persistent_real_read_trigger(payload)
+    if trigger not in {"manual", "scheduled"}:
+        return persistent_real_read_blocked(
+            "persistent_real_read_trigger_invalid",
+            "长期真实读取触发方式只支持手动或定时。",
+            trigger=trigger,
+        )
+    if not bool(getattr(config.wx_cli, "persistent_real_read_enabled", False)):
+        return persistent_real_read_blocked(
+            "persistent_real_read_disabled",
+            "长期真实读取授权默认关闭；未执行真实读取。",
+            trigger=trigger,
+        )
+    if bool(getattr(config.wx_cli, "persistent_real_read_paused", False)):
+        return persistent_real_read_blocked(
+            "persistent_real_read_paused",
+            "长期真实读取已暂停；未执行真实读取。",
+            trigger=trigger,
+        )
+    test_account_confirmed = bool(
+        getattr(config.wx_cli, "persistent_real_read_test_account_confirmed", False)
+    ) or parse_bool(payload.get("test_wechat_account_confirmed"), False)
+    if not test_account_confirmed:
+        return persistent_real_read_blocked(
+            "persistent_real_read_test_account_required",
+            "长期真实读取需要确认 Windows 测试微信号；未执行真实读取。",
+            trigger=trigger,
+        )
+    if trigger == "scheduled" and not bool(
+        getattr(config.wx_cli, "persistent_real_read_schedule_enabled", False)
+    ):
+        return persistent_real_read_blocked(
+            "persistent_real_read_schedule_disabled",
+            "长期真实读取定时触发未开启；未执行真实读取。",
+            trigger=trigger,
+        )
+
+    caps = expanded_real_trial_caps(config)
+    window_payload = dict(payload)
+    if (
+        clean_text(window_payload.get("lookback_days")) == ""
+        and clean_text(window_payload.get("start_time") or window_payload.get("start_at")) == ""
+        and clean_text(window_payload.get("end_time") or window_payload.get("end_at")) == ""
+    ):
+        window_payload["lookback_days"] = persistent_real_read_default_lookback_days(config)
+    window_summary, error_code = trial_window_summary(window_payload, caps)
+    if error_code == "expanded_trial_time_range_invalid":
+        return persistent_real_read_blocked(
+            "expanded_trial_time_range_invalid",
+            "长期真实读取起止时间必须完整且结束时间晚于开始时间。",
+            trigger=trigger,
+        )
+    if error_code or window_summary is None:
+        return persistent_real_read_blocked(
+            "expanded_trial_lookback_days_invalid",
+            "长期真实读取天数必须是正整数。",
+            trigger=trigger,
+        )
+    if window_summary["effective_lookback_days"] > caps["max_allowed_lookback_days"]:
+        return persistent_real_read_blocked(
+            "expanded_trial_lookback_days_too_large",
+            "长期真实读取范围超过当前配置上限。",
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+
+    max_total_messages, error_code = parse_trial_int(
+        payload.get("max_total_messages", payload.get("limit")),
+        caps["max_total_messages"],
+        "expanded_trial_total_limit_invalid",
+    )
+    if error_code or max_total_messages is None or max_total_messages < 1:
+        return persistent_real_read_blocked(
+            "expanded_trial_total_limit_invalid",
+            "长期真实读取总消息上限必须是正整数。",
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+    if max_total_messages > caps["max_total_messages"]:
+        return persistent_real_read_blocked(
+            "expanded_trial_total_limit_too_large",
+            "长期真实读取总消息上限超过安全配置。",
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+
+    max_messages_per_group, error_code = parse_trial_int(
+        payload.get("max_messages_per_group"),
+        caps["max_messages_per_group"],
+        "expanded_trial_group_limit_invalid",
+    )
+    if error_code or max_messages_per_group is None or max_messages_per_group < 1:
+        return persistent_real_read_blocked(
+            "expanded_trial_group_limit_invalid",
+            "长期真实读取单群消息上限必须是正整数。",
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+    if max_messages_per_group > caps["max_messages_per_group"]:
+        return persistent_real_read_blocked(
+            "expanded_trial_group_limit_too_large",
+            "长期真实读取单群消息上限超过安全配置。",
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+
+    batch_limit, error_code = parse_trial_int(
+        payload.get("batch_limit", payload.get("max_batches")),
+        caps["batch_limit"],
+        "expanded_trial_batch_limit_invalid",
+    )
+    if error_code or batch_limit is None or batch_limit < 1:
+        return persistent_real_read_blocked(
+            "expanded_trial_batch_limit_invalid",
+            "长期真实读取批次上限必须是正整数。",
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+    if batch_limit > caps["batch_limit"]:
+        return persistent_real_read_blocked(
+            "expanded_trial_batch_limit_too_large",
+            "长期真实读取批次上限超过安全配置。",
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+
+    selected_sessions, requested_group_count, scope_valid = persistent_selected_sessions(
+        config, payload
+    )
+    selected_group_count = len(selected_sessions)
+    if not scope_valid:
+        return persistent_real_read_blocked(
+            "persistent_real_read_group_scope_invalid",
+            "长期真实读取只能读取已启用白名单监控群。",
+            selected_group_count=selected_group_count,
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+    if selected_group_count < 1:
+        return persistent_real_read_blocked(
+            "expanded_trial_no_groups_selected",
+            "没有可用于长期真实读取的启用白名单群。",
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+    if selected_group_count > caps["max_groups"]:
+        return persistent_real_read_blocked(
+            "expanded_trial_group_count_too_large",
+            "长期真实读取群数量超过安全配置。",
+            selected_group_count=selected_group_count,
+            window_summary=window_summary,
+            trigger=trigger,
+        )
+
+    limits_summary = {
+        **window_summary,
+        "max_groups": caps["max_groups"],
+        "max_total_messages": caps["max_total_messages"],
+        "requested_total_messages": max_total_messages,
+        "max_messages_per_group": caps["max_messages_per_group"],
+        "requested_messages_per_group": max_messages_per_group,
+        "batch_limit": caps["batch_limit"],
+        "requested_batch_limit": batch_limit,
+    }
+    if executor is not None:
+        execution_result = execution_summary_from_result(
+            executor(
+                {
+                    "authorization_mode": "persistent",
+                    "trigger": trigger,
+                    "selected_group_count": selected_group_count,
+                    "window": dict(window_summary),
+                    "limits": dict(limits_summary),
+                    "real_read_enabled_before": bool(config.wx_cli.real_read_enabled),
+                }
+            )
+        )
+    else:
+        real_read_before = bool(config.wx_cli.real_read_enabled)
+        try:
+            config.wx_cli.real_read_enabled = True
+            execution_result = execute_configurable_real_trial_once(
+                config,
+                conn,
+                selected_sessions,
+                window_summary,
+                limits_summary,
+                collection_mode="persistent_real_read",
+            )
+        finally:
+            config.wx_cli.real_read_enabled = False
+            if real_read_before and conn is None:
+                config.wx_cli.real_read_enabled = False
+
+    failure_summary = {
+        "status": execution_result["status"],
+        "error_code": execution_result["error_code"],
+        "error_count": 1 if execution_result["error_code"] else 0,
+        "failed_group_count": execution_result["sessions_failed"],
+        "details_returned": False,
+    }
+    return {
+        "status": execution_result["status"],
+        "authorization_mode": "persistent",
+        "trigger": trigger,
+        "will_run": True,
+        "real_read_enabled": False,
+        "real_read_enabled_after": False,
+        "error_code": execution_result["error_code"],
+        "reason_code": execution_result["error_code"],
+        "message": "长期真实读取已通过授权配置进入执行路径；响应仅返回数量和状态摘要。",
+        "scope": {
+            "scope_mode": "configurable_window",
+            "authorization_mode": "persistent",
+            "trigger": trigger,
+            "multi_group": True,
+            "lookback_days": window_summary["effective_lookback_days"],
+            "enabled_whitelist_count": len(enabled_whitelist_sessions(config)),
+            "requested_group_count": requested_group_count,
+            "selected_group_count": selected_group_count,
+            "test_wechat_account_confirmed": True,
+            "groups_returned": False,
+            "session_names_returned": False,
+            "no_external_send": True,
+            "no_auto_reply": True,
+            "no_formal_write": True,
+            **window_summary,
+        },
+        "limits": limits_summary,
+        "execution": {
+            "entry_opened": True,
+            "authorization_mode": "persistent",
+            "persistent_authorization_enabled": True,
+            "will_execute_wx_history": True,
+            "will_execute_wx_search": False,
+            "will_execute_wx_export": False,
+            "will_execute_wx_new_messages": False,
+            "no_real_read_executed": False,
+            "real_read_enabled_after": False,
+            "writes_local_raw_normalized_candidate": True,
+        },
+        "execution_summary": execution_result,
+        "failure_summary": failure_summary,
+    }
+
+
+def persistent_real_read_control_payload(
+    config: AppConfig,
+    payload: dict[str, Any],
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    action = clean_text(payload.get("action")).lower().replace("-", "_")
+    if action in {"pause", "paused"}:
+        config.wx_cli.persistent_real_read_paused = True
+        status = "paused"
+    elif action in {"resume", "resumed"}:
+        config.wx_cli.persistent_real_read_paused = False
+        status = "resumed"
+    elif action in {"enable", "enabled"}:
+        config.wx_cli.persistent_real_read_enabled = True
+        config.wx_cli.persistent_real_read_paused = False
+        config.wx_cli.persistent_real_read_test_account_confirmed = parse_bool(
+            payload.get("test_account_confirmed"),
+            bool(
+                getattr(
+                    config.wx_cli,
+                    "persistent_real_read_test_account_confirmed",
+                    False,
+                )
+            ),
+        )
+        status = "enabled"
+    elif action in {"disable", "disabled"}:
+        config.wx_cli.persistent_real_read_enabled = False
+        config.wx_cli.persistent_real_read_paused = False
+        status = "disabled"
+    else:
+        return {
+            "status": "blocked",
+            "error_code": "persistent_real_read_control_action_invalid",
+            "persistent_authorization": persistent_real_read_contract_payload(config),
+            "real_read_enabled_after": False,
+        }
+    config.wx_cli.real_read_enabled = False
+    write_config_center_yaml(config)
+    return {
+        "status": status,
+        "error_code": "",
+        "persistent_authorization": persistent_real_read_contract_payload(config),
+        "save_target": "config/app.yaml",
+        "triggers_collection": False,
+        "real_read_enabled_after": False,
+        "formal_write_enabled": False,
+    }
 
 
 def expanded_real_trial_run_plan(
@@ -5873,6 +6459,13 @@ def real_trial_run_plan(
     executor: Callable[[dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
     if normalized_real_trial_scope_mode(payload) == "configurable_window":
+        if normalized_authorization_mode(payload) == "persistent":
+            return persistent_real_read_run_plan(
+                config,
+                payload,
+                conn=conn,
+                executor=executor,
+            )
         return expanded_real_trial_run_plan(
             config,
             payload,
@@ -5997,6 +6590,24 @@ def write_config_center_yaml(config: AppConfig) -> None:
             "expanded_real_batch_limit": expanded_real_trial_caps(config)[
                 "batch_limit"
             ],
+            "persistent_real_read_enabled": bool(
+                getattr(config.wx_cli, "persistent_real_read_enabled", False)
+            ),
+            "persistent_real_read_paused": bool(
+                getattr(config.wx_cli, "persistent_real_read_paused", False)
+            ),
+            "persistent_real_read_test_account_confirmed": bool(
+                getattr(config.wx_cli, "persistent_real_read_test_account_confirmed", False)
+            ),
+            "persistent_real_read_schedule_enabled": bool(
+                getattr(config.wx_cli, "persistent_real_read_schedule_enabled", False)
+            ),
+            "persistent_real_read_interval_minutes": persistent_real_read_interval_minutes(
+                config
+            ),
+            "persistent_real_read_default_lookback_days": persistent_real_read_default_lookback_days(
+                config
+            ),
         },
         "collector": {
             "interval_minutes": config.collector.interval_minutes,

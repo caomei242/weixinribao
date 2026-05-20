@@ -39,6 +39,12 @@ class WxCliConfig:
     expanded_real_max_total_messages: int = 5000
     expanded_real_max_messages_per_group: int = 500
     expanded_real_batch_limit: int = 1
+    persistent_real_read_enabled: bool = False
+    persistent_real_read_paused: bool = False
+    persistent_real_read_test_account_confirmed: bool = False
+    persistent_real_read_schedule_enabled: bool = False
+    persistent_real_read_interval_minutes: int = 60
+    persistent_real_read_default_lookback_days: float = 30
 
 
 @dataclass
@@ -231,6 +237,42 @@ def load_config(path: Path | str | None = None, root: Path | None = None) -> App
         wx_cli.get(
             "expanded_real_batch_limit",
             config.wx_cli.expanded_real_batch_limit,
+        )
+    )
+    config.wx_cli.persistent_real_read_enabled = _parse_bool(
+        wx_cli.get(
+            "persistent_real_read_enabled",
+            config.wx_cli.persistent_real_read_enabled,
+        )
+    )
+    config.wx_cli.persistent_real_read_paused = _parse_bool(
+        wx_cli.get(
+            "persistent_real_read_paused",
+            config.wx_cli.persistent_real_read_paused,
+        )
+    )
+    config.wx_cli.persistent_real_read_test_account_confirmed = _parse_bool(
+        wx_cli.get(
+            "persistent_real_read_test_account_confirmed",
+            config.wx_cli.persistent_real_read_test_account_confirmed,
+        )
+    )
+    config.wx_cli.persistent_real_read_schedule_enabled = _parse_bool(
+        wx_cli.get(
+            "persistent_real_read_schedule_enabled",
+            config.wx_cli.persistent_real_read_schedule_enabled,
+        )
+    )
+    config.wx_cli.persistent_real_read_interval_minutes = int(
+        wx_cli.get(
+            "persistent_real_read_interval_minutes",
+            config.wx_cli.persistent_real_read_interval_minutes,
+        )
+    )
+    config.wx_cli.persistent_real_read_default_lookback_days = float(
+        wx_cli.get(
+            "persistent_real_read_default_lookback_days",
+            config.wx_cli.persistent_real_read_default_lookback_days,
         )
     )
 

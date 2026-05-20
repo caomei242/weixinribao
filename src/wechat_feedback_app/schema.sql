@@ -28,7 +28,7 @@ create table if not exists people_aliases (
 
 create table if not exists collection_runs (
   id integer primary key autoincrement,
-  mode text not null check(mode in ('fixture', 'real')),
+  mode text not null check(mode in ('fixture', 'real', 'real_trial_once', 'persistent_real_read')),
   started_at text not null,
   finished_at text,
   status text not null check(status in ('success', 'partial_failed', 'failed')),

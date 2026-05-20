@@ -19,8 +19,62 @@ def connect(path: str | Path) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
     conn.executescript(schema)
+    migrate_collection_runs_modes(conn)
     migrate_export_records(conn)
     conn.commit()
+
+
+def migrate_collection_runs_modes(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "select sql from sqlite_master where type = 'table' and name = 'collection_runs'"
+    ).fetchone()
+    if row is None:
+        return
+    sql = str(row["sql"])
+    if "persistent_real_read" in sql and "real_trial_once" in sql:
+        return
+
+    conn.execute("drop table if exists collection_runs_legacy")
+    conn.execute("alter table collection_runs rename to collection_runs_legacy")
+    conn.execute(
+        """
+        create table collection_runs (
+          id integer primary key autoincrement,
+          mode text not null check(mode in (
+            'fixture', 'real', 'real_trial_once', 'persistent_real_read'
+          )),
+          started_at text not null,
+          finished_at text,
+          status text not null check(status in ('success', 'partial_failed', 'failed')),
+          sessions_total integer not null default 0,
+          sessions_success integer not null default 0,
+          sessions_failed integer not null default 0,
+          raw_messages_seen integer not null default 0,
+          raw_messages_inserted integer not null default 0,
+          raw_messages_duplicated integer not null default 0,
+          candidate_items_created integer not null default 0,
+          candidate_items_updated integer not null default 0,
+          error_code text,
+          error_message text
+        )
+        """
+    )
+    conn.execute(
+        """
+        insert into collection_runs (
+          id, mode, started_at, finished_at, status, sessions_total,
+          sessions_success, sessions_failed, raw_messages_seen,
+          raw_messages_inserted, raw_messages_duplicated,
+          candidate_items_created, candidate_items_updated, error_code, error_message
+        )
+        select id, mode, started_at, finished_at, status, sessions_total,
+               sessions_success, sessions_failed, raw_messages_seen,
+               raw_messages_inserted, raw_messages_duplicated,
+               candidate_items_created, candidate_items_updated, error_code, error_message
+        from collection_runs_legacy
+        """
+    )
+    conn.execute("drop table collection_runs_legacy")
 
 
 def migrate_export_records(conn: sqlite3.Connection) -> None:

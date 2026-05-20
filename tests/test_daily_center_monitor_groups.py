@@ -319,7 +319,8 @@ class DailyCenterMonitorGroupsTest(unittest.TestCase):
             session_payload = payload["editable"]["sessions"][0]
 
             self.assertIn("member_options", session_payload)
-            self.assertIn("member_name_options", session_payload)
+            self.assertNotIn("member_name_options", session_payload)
+            self.assertFalse(session_payload["member_list_returned"])
             self.assertFalse(session_payload["member_options"]["complete"])
             self.assertEqual(session_payload["member_options"]["refresh_status"], "local_rebuilt")
             self.assertEqual(session_payload["member_options"]["scope"], "appeared_members")
@@ -328,8 +329,9 @@ class DailyCenterMonitorGroupsTest(unittest.TestCase):
                 session_payload["member_options"]["roster_status"],
                 "real_mode_required",
             )
-            self.assertIn("成员甲", session_payload["member_name_options"])
-            self.assertIn("负责人甲", session_payload["member_name_options"])
+            self.assertEqual(session_payload["member_options"]["count"], 4)
+            self.assertNotIn("names", session_payload["member_options"])
+            self.assertNotIn("items", session_payload["member_options"])
             self._assert_payload_has_no_sensitive_text(session_payload, root)
 
     def test_member_options_include_latest_trial_senders_when_main_db_empty(self):
@@ -366,8 +368,14 @@ class DailyCenterMonitorGroupsTest(unittest.TestCase):
             self.assertEqual(detail["member_options"]["refresh_status"], "local_rebuilt")
             self.assertIn("不是微信群全员名单", detail["member_options"]["status_label"])
             self.assertIn("本地试读成员甲", detail["member_name_options"])
-            self.assertEqual(session_payload["member_name_options"], detail["member_name_options"])
-            self.assertGreater(len(session_payload["member_name_options"]), 0)
+            self.assertNotIn("member_name_options", session_payload)
+            self.assertEqual(
+                session_payload["member_options"]["count"],
+                detail["member_options"]["count"],
+            )
+            self.assertFalse(session_payload["member_list_returned"])
+            self.assertNotIn("names", session_payload["member_options"])
+            self.assertNotIn("items", session_payload["member_options"])
             self._assert_payload_has_no_sensitive_text(detail, root)
             self._assert_payload_has_no_sensitive_text(session_payload, root)
 

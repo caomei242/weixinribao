@@ -194,7 +194,6 @@ def collect_normalized_messages(
         candidate_items_updated=candidate_updated,
     )
 
-
 def infer_sender_role(message: dict[str, str], session, aliases: set[str]) -> str:
     hinted = message.get("raw_payload", {}).get("sender_role") or message.get("sender_role")
     if hinted in {"internal", "customer", "channel", "unknown"}:
