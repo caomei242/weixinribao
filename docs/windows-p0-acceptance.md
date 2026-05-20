@@ -20,6 +20,8 @@ Windows 可实战第一版 P0 已在 Mac 开发机运行态通过测试审查联
 
 2026-05-20 13:51 CST 封版口径：当前代码可作为 Windows P0 实机部署复验版本。部署线只做代码同步、启动服务和只读复验，不再混入日报产品化、群管理增强、我方人员减负、Slock Agent 或长期挂机新需求。新需求另起开发线排期。
 
+2026-05-20 15:19 CST Windows 实机整机重启复验已完成通过：重启标记变化，Slock daemon、本地服务、页面访问、wx-cli readiness/test 均返回 `status=ok`，只记录 count/status/error_code/字段存在性。Windows P0 冻结版可作为正式挂机机放行；这不等于授权真实读取、真实 roster 同步、自动外发、写正式区或把下一轮开发版自动同步到 Windows。
+
 ## 验收路径
 
 按以下顺序验收，不要只看单点 API：

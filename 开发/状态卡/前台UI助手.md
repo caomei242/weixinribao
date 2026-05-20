@@ -2,12 +2,12 @@
 
 线程名：微信agent专项 前台/UI 助手
 线程 id：019e3a21-b1f1-7fa0-a8ff-4ce933048d87
-更新时间：2026-05-20 12:49 CST
-结论：完成 `监工返工：2026-05-20｜前台UI｜群管理归档删除入口与日报生成点击反馈`。本轮只做前台/UI最小实现：群管理补清楚的归档 / 删除入口和二次确认，日报生成补可验收点击反馈证据；未改后端、未执行真实读取或真实同步。
+更新时间：2026-05-20 14:24 CST
+结论：完成 `监工派工：2026-05-20｜前台UI｜下一轮日报产品化与配置减负工作台`。本轮是 Windows P0 冻结后的下一轮前台/UI开发状态，不覆盖 Windows P0 实机复验口径；只做日报中心产品化、配置减负和主路径轻量接线。
 
 ## 任务标记
 
-监工返工：2026-05-20｜前台UI｜群管理归档删除入口与日报生成点击反馈
+监工派工：2026-05-20｜前台UI｜下一轮日报产品化与配置减负工作台
 
 ## 改动文件
 
@@ -17,55 +17,60 @@
 - `/Users/gd/Desktop/微信agent专项/开发/状态卡/前台UI助手.md`
 - `/Users/gd/Desktop/微信agent专项/开发/监工回报队列.md`
 
-## 归档 / 删除入口与二次确认
+## 日报中心产品化
 
-- 群管理操作区新增 `归档`、`删除` 两个入口；归档成功后卡片 / 编辑状态显示 `已归档`。
-- `归档` 二次确认说明：只移出日常监控 / 日报统计，不删除真实微信群，不外发，不写正式区；失败保留当前列表。
-- `删除` 二次确认说明：只删除本项目本地监控群配置，不影响真实微信群、客户系统、正式日报、待办、Obsidian 或外部系统；失败保留当前列表。
-- 前台接线：归档优先调用 `POST /api/monitor-groups/{group_id}/archive`，若该最小契约未到位则降级到已有 disable 能力并标记归档；删除优先调用 `POST /api/monitor-groups/{group_id}/delete` 且带 `confirm_delete=true`，若未到位再尝试旧 DELETE / config-center 本地配置移除兜底。
-- 成功 / 失败 / blocked 均给人话反馈；失败或被拦截时恢复旧列表，不给用户误删错觉。
+- 日报中心继续默认首页，标题 / 说明、操作区、状态卡、日报正文保持自然流布局，不回到挤压结构。
+- 接入 `/api/daily-center` 的 count/status 摘要，用于区分新发现、未完成跟进、历史未跟进和日报状态。
+- 日报右侧新增 `待处理工作台`，只展示 count/status/action 级任务：未完成跟进事项、历史未跟进、配置减负、日报生成反馈。
+- 待处理工作台按钮仍走固定页切换，不跳下方、不弹技术面板。
 
-## 日报生成 1 秒反馈点击证据
+## 群管理下拉化 / 配置减负
 
-- 运行态拦截式 smoke，未调用真实日报生成接口正文，未摘录日报内容。
-- 点击 `生成/刷新日报` 后 250ms 内：`postSeen=true`、`disabled=true`、`buttonGenerating=true`、`metaGenerating=true`、`oldReportRetained=true`、`activePage=daily`。
-- 拦截响应后：`status=success`、`successFeedback=true`、`buttonsEnabled=true`。
-- 生成中提示文案保留“旧日报会保留到新版完成”；失败路径保留“生成失败 / 旧日报已保留”的人话提示。
+- 群管理表单新增 `配置减负` 状态条，展示客户选项、群类型、业务模块、客户阶段和成员角色分配的 count/status。
+- 群类型、业务模块、客户阶段、试读范围、验证状态优先消费后端 `field_options`，再叠加本地安全默认值和已有群档案选项。
+- 客户名称继续消费后端 `customer_options` / suggestion 三态；已有新增 / 编辑 / 停用 / 归档 / 删除 / 成员同步授权能力未回退。
+- 负责人、常用联系人、我方人员仍保持统一成员池 + 角色分配，不退回三处手输名单。
 
-## Windows P0 回归
+## 我方人员自动补齐
 
-- 静态 / 运行态 smoke 均确认 readiness 仍保留 `/api/windows-readiness` 接线。
-- 消息明细仍保留 `/api/messages/v1` 接线与单群 0 条“不回退显示全部群”空态。
-- 日报中心默认首页、首屏布局、群管理新增 / 编辑 / 停用、我方人员页既有入口均未做回退改动。
-- 静态资源版本更新为 `20260520-archive-delete-feedback`，降低刷新后旧前台资源缓存风险。
+- 我方人员页保留固定表单 / 识别向导。
+- 输入微信号或微信显示名时新增 debounce 自动调用 `/api/internal-people/suggestions`；按钮识别入口仍保留。
+- 后端建议命中后自动预填人员姓名、微信显示名、别名、角色、负责模块、启用状态和影响范围；保存仍走 `/api/internal-people`，保存后读回。
+- 若后端只拿到内部标识且无显示名，仍提示“未识别到名字，请补一个显示名”，不把 ID 当主名称保存。
+
+## 消息先选群
+
+- 消息明细保留 `/api/messages/v1` 主路径。
+- 单群 0 条仍显示空态，不回退全部群；不把多群消息混排成用户看不懂的列表。
 
 ## 测试 / 证据
 
 - `node --check src/wechat_feedback_app/static/app.js`：exit=0
 - `git diff --check -- src/wechat_feedback_app/static/index.html src/wechat_feedback_app/static/styles.css src/wechat_feedback_app/static/app.js`：exit=0
 - `git diff --check`：exit=0
-- 静态 grep smoke：归档 / 删除按钮、确认文案、`/api/windows-readiness`、`/api/messages/v1`、单群不回退空态、生成中文案均存在。
-- 运行态 Chrome/CDP smoke：root HTTP 200；归档按钮存在且可用；删除按钮存在且可用；归档确认安全文案存在；归档请求拦截命中；归档状态显示成功；删除确认安全文案存在；删除请求拦截命中；删除后本地列表移除；日报生成 250ms 内进入生成中。
+- HTTP count/status smoke：`/api/daily-center`、`/api/monitor-groups`、`/api/internal-people`、`/api/messages/v1`、`/api/windows-readiness` 均 HTTP 200，只记录 status/count/字段存在性。
+- 运行态 Chrome/CDP DOM smoke：日报待处理工作台 rows=4；`/api/daily-center` 可载入；群管理配置减负状态存在，客户 / 群类型 / 模块 / 阶段下拉均有 option；归档 / 删除 / 成员池存在；我方人员输入后 suggestion 调用 count>=1，表单字段自动预填，别名 chip 可见；messages/v1 和单群不回退空态保留。
 - 本轮未运行 Python。
 
 ## 字段白名单 / 安全边界
 
-- 状态卡、回报和 smoke 只记录 HTTP status、count/status、字段存在性、布尔值、按钮存在性、确认文案存在性和接口路径。
+- 状态卡、回报和 smoke 只记录 HTTP status、count/status、error_code、字段存在性、布尔值和接口路径。
 - 未执行新的真实读取、未执行真实 roster 同步、未执行 `wx history/search/export/new-messages`。
 - 未打开或摘录真实 SQLite / exports 正文。
 - 未记录真实消息正文、候选正文、草稿正文、真实会话列表、真实成员名单、客户名单、wxid、key、salt、真实 DB 路径或 daemon 原始日志。
 - 未写正式日报、正式待办池、Obsidian 正式区或外部系统。
+- `real_read_enabled=false` 口径未改。
 
 ## 剩余风险
 
-- 本轮不改后端；已按后端/API助手回报的新契约接入 `POST /archive` 与 `POST /delete(confirm_delete=true)`，同时保留旧服务兜底。
-- 运行态 destructive smoke 使用临时 synthetic group + fetch 拦截，不触发真实归档 / 删除 / 日报生成；Windows 实机仍需后续按实机验收流程复验。
+- 本轮只做前台/UI产品化和配置减负，不做多人使用、Slock 专属 agent、Windows 长期挂机方案或自动外发 / 自动写正式区。
+- 运行态 smoke 对我方人员 suggestion 使用前台拦截的 synthetic 返回，只验证前台自动补齐链路，不读取真实人员名单。
+- Windows P0 实机复验基准需继续按冻结口径单独验收，不应把本轮新开发混入 P0 通过条件。
 
 ## 下一棒建议
 
-- 测试审查复验群管理归档 / 删除按钮、二次确认、失败保留旧列表、日报生成 1 秒反馈。
-- 优先复验前台是否走原生 `POST /archive`、`POST /delete(confirm_delete=true)`；旧服务场景再复验 config-center 删除本地配置的兜底链路。
-- 通过后再进入 Windows 实机复验，继续只记录 count/status/source/error_code 和字段存在性。
+- 测试审查可按下一轮口径复验：日报工作台 rows/count/status、群管理后端选项驱动、我方人员自动补齐、messages/v1 单群空态不回退。
+- 后端/API若继续扩展配置减负字段，优先补充 `field_options` 与 suggestion 摘要字段，不要要求前台手填散文本。
 
 ## 回报状态
 
