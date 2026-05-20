@@ -16,8 +16,11 @@ function Write-HealthLog {
 try {
   $status = Invoke-RestMethod -Method Get -Uri "$BaseUrl/api/status" -TimeoutSec 10
   $connection = Invoke-RestMethod -Method Get -Uri "$BaseUrl/api/wx-cli/test" -TimeoutSec 10
-  Write-HealthLog "ok status=$($status.mode) connection=$($connection.status)"
-  Write-Output "health=ok mode=$($status.mode) connection=$($connection.status) log=$log"
+  $windows = Invoke-RestMethod -Method Get -Uri "$BaseUrl/api/windows-readiness" -TimeoutSec 10
+  $customers = Invoke-RestMethod -Method Get -Uri "$BaseUrl/api/customer-options" -TimeoutSec 10
+  $generation = Invoke-RestMethod -Method Get -Uri "$BaseUrl/api/daily-center/generation-status" -TimeoutSec 10
+  Write-HealthLog "ok status=$($status.mode) connection=$($connection.status) windows=$($windows.config_isolation_status) customers=$($customers.customer_options_count) generation=$($generation.status)"
+  Write-Output "health=ok mode=$($status.mode) connection=$($connection.status) windows=$($windows.config_isolation_status) customer_options_count=$($customers.customer_options_count) generation=$($generation.status) log=$log"
 } catch {
   Write-HealthLog "failed error=$($_.Exception.Message)"
   Write-Output "health=failed log=$log"

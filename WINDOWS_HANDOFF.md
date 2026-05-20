@@ -5,6 +5,12 @@
 - Windows 目标路径：`D:\wechat-agent\app`
 - 本轮目标：先把 Windows 机器跑通本地服务、fixture 页面、健康检查和任务计划预演。
 
+> 2026-05-20 更新：本文仍是“Windows 预演”接力包。当前 Windows 可实战第一版的正式验收清单已经迁移到 `docs/windows-p0-acceptance.md`；后续不要只按本文的 fixture 预演标准验收 P0 主流程。
+
+> 2026-05-20 12:07 CST 更新：Windows 可实战第一版 P0 已在 Mac 开发机运行态完成代码侧测试审查，通过项包括 Windows readiness、监控群、我方人员、消息多群视图、候选入口、日报生成即时反馈和日报中心首屏布局。Windows 机器仍未实机复验；接力时请按 `docs/windows-p0-acceptance.md` 做完整用户路径验收。
+
+> 2026-05-20 13:51 CST 封版更新：P0 小返工已补齐群管理本地归档 / 删除和日报生成点击反馈，测试审查完成通过。当前版本可以进入 Windows 实机部署 + 只读复验；部署线只做运行环境、服务启动、页面打开和主路径 count/status 复验，不加新功能。
+
 ## 先说人话
 
 这一步不是正式接微信消息，也不是让它开始每 30 分钟抓群。
@@ -182,6 +188,8 @@ fixture 模式下，期望看到的是服务状态能返回、测试文件能读
 - `http://127.0.0.1:8765` 能打开。
 - `health_check.ps1` 能跑完。
 - 如果注册任务计划，明确知道它只是服务和健康检查，不是抓消息。
+
+Windows 可实战第一版 P0 通过标准另见 `docs/windows-p0-acceptance.md`。仅通过本节 fixture 预演不能代表 Windows P0 已可实战。
 
 需要返工：
 

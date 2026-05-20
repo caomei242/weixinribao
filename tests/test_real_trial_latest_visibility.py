@@ -106,8 +106,8 @@ class RealTrialLatestVisibilityTest(unittest.TestCase):
             / "index.html"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("/static/styles.css?v=20260519-daily-center-p0", index_html)
-        self.assertIn("/static/app.js?v=20260519-daily-center-p0", index_html)
+        self.assertRegex(index_html, r"/static/styles\.css\?v=20\d{6}-[a-z0-9-]+")
+        self.assertRegex(index_html, r"/static/app\.js\?v=20\d{6}-[a-z0-9-]+")
 
     def test_real_trial_summary_has_redacted_error_fallback(self):
         app_js = (
@@ -818,7 +818,7 @@ class RealTrialLatestVisibilityTest(unittest.TestCase):
         self.assertIn("group_type", app_js)
         self.assertIn("common_contacts", app_js)
         self.assertIn("reply_notes", app_js)
-        self.assertIn("/api/real-trial/latest/messages", app_js)
+        self.assertIn("/api/messages/v1", app_js)
         self.assertIn("/api/real-trial/latest/items/${item.id}/messages", app_js)
         self.assertIn("/api/real-trial/sender-map", app_js)
         self.assertIn("renderRealTrialMessages", app_js)

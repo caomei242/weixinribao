@@ -62,6 +62,13 @@ class WxCliCommandResult:
     binary_path: str = ""
 
 
+@dataclass
+class NormalizedRosterMember:
+    display_name: str
+    raw_id: str | None = None
+    is_owner: bool = False
+
+
 def fetch_messages(
     config: AppConfig, now: datetime | None = None
 ) -> list[NormalizedMessage]:
@@ -94,6 +101,66 @@ def fetch_fixture_messages(config: AppConfig) -> list[NormalizedMessage]:
             )
         )
     return messages
+
+
+def fetch_group_roster_members(
+    config: AppConfig,
+    session: SessionConfig,
+    *,
+    authorized: bool = False,
+    runner: Any | None = None,
+) -> list[NormalizedRosterMember]:
+    if not authorized:
+        raise WxCliUnavailable(
+            "roster_authorization_required",
+            "完整群成员同步需要用户显式授权；不会自动执行 wx members。",
+        )
+    if config.wx_cli.mode != "real":
+        raise WxCliUnavailable(
+            "roster_real_mode_required",
+            "完整群成员同步需要真实 wx-cli 模式；当前不会执行 wx members。",
+        )
+    readiness = wx_cli_readiness(config)
+    if readiness["status"] != "ok":
+        raise WxCliUnavailable(
+            readiness["status"],
+            safe_roster_error_message(readiness["status"]),
+        )
+    run = runner or run_wx_cli_json
+    result = run(config, build_members_args(session))
+    if result.status != "ok":
+        raise WxCliUnavailable(result.status, safe_roster_error_message(result.status))
+    return map_members_payload(result.parsed)
+
+
+def build_members_args(session: SessionConfig) -> list[str]:
+    chat = session.display_name or session.external_id
+    return ["members", chat, "--json"]
+
+
+def map_members_payload(payload: Any) -> list[NormalizedRosterMember]:
+    if isinstance(payload, dict):
+        items = payload.get("members")
+    else:
+        items = payload
+    if not isinstance(items, list):
+        return []
+    members: list[NormalizedRosterMember] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        display_name = first_text(
+            item,
+            ["display", "display_name", "nickname", "nick_name", "remark", "name"],
+        ) or ""
+        members.append(
+            NormalizedRosterMember(
+                display_name=display_name,
+                raw_id=first_text(item, ["username", "wxid", "member_id", "id"]),
+                is_owner=bool(item.get("is_owner")),
+            )
+        )
+    return members
 
 
 def fetch_real_trial_messages(
@@ -243,6 +310,19 @@ def safe_history_error_message(status: str) -> str:
         "parse_error": "wx history 输出不可解析；未保存任何真实消息。",
         "timeout": "wx history 命令超时；未保存任何真实消息。",
     }.get(status, "wx history 执行失败；未保存任何真实消息。")
+
+
+def safe_roster_error_message(status: str) -> str:
+    return {
+        "roster_authorization_required": "完整群成员同步需要用户显式授权；未执行。",
+        "roster_real_mode_required": "完整群成员同步需要真实 wx-cli 模式；未执行。",
+        "missing_binary": "找不到 wx-cli 二进制；未同步完整群成员。",
+        "not_initialized": "wx-cli 尚未初始化；未同步完整群成员。",
+        "wechat_not_running": "微信未运行、未登录或本地数据不可读；未同步完整群成员。",
+        "permission_denied": "权限不足；未同步完整群成员。",
+        "parse_error": "wx members 输出不可解析；未保存完整群成员。",
+        "timeout": "wx members 命令超时；未保存完整群成员。",
+    }.get(status, "wx members 执行失败；未同步完整群成员。")
 
 
 def test_connection(config: AppConfig) -> dict[str, str]:

@@ -104,17 +104,19 @@ def seed_config(conn: sqlite3.Connection, config: AppConfig) -> None:
         )
 
     for person in config.internal_people:
-        aliases = {person.person_name, *person.aliases}
+        aliases = {person.person_name, person.wechat_display_name, *person.aliases}
         for alias in aliases:
+            if not alias:
+                continue
             conn.execute(
                 """
                 insert into people_aliases (person_name, alias, role, enabled)
-                values (?, ?, 'internal', 1)
+                values (?, ?, 'internal', ?)
                 on conflict(alias, role) do update set
                   person_name = excluded.person_name,
                   enabled = excluded.enabled
                 """,
-                (person.person_name, alias),
+                (person.person_name, alias, 1 if person.enabled else 0),
             )
     conn.commit()
 

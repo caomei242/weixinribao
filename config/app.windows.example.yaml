@@ -1,0 +1,42 @@
+app:
+  host: "127.0.0.1"
+  port: 8765
+
+database:
+  path: "data/wechat_feedback.windows.sqlite3"
+
+wx_cli:
+  mode: "real"
+  binary: "wx"
+  timeout_seconds: 15
+  fixture_dir: "fixtures"
+  real_read_enabled: false
+  real_allowed_session: ""
+  real_lookback_hours: 2
+  real_limit: 50
+  real_start_at: ""
+  real_end_at: ""
+
+collector:
+  interval_minutes: 60
+  lookback_minutes: 120
+
+export:
+  directory: "exports"
+
+sessions: []
+
+internal_people: []
+
+risk:
+  keywords:
+    - "报价"
+    - "合同"
+    - "金额"
+    - "投诉"
+    - "赔偿"
+    - "退款"
+    - "回复"
+  sensitive_keywords:
+    - "身份证"
+    - "手机号"

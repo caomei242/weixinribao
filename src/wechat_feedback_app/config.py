@@ -66,12 +66,20 @@ class SessionConfig:
     include_in_daily: bool = True
     trial_scope: str = "最近50条"
     internal_people: list[str] = field(default_factory=list)
+    owner_names: list[str] = field(default_factory=list)
+    roster_member_names: list[str] = field(default_factory=list)
+    archived: bool = False
 
 
 @dataclass
 class PersonConfig:
     person_name: str
     aliases: list[str] = field(default_factory=list)
+    wechat_display_name: str = ""
+    role: str = "我方人员"
+    modules: list[str] = field(default_factory=list)
+    enabled: bool = True
+    notes: str = ""
 
 
 @dataclass
@@ -216,9 +224,7 @@ def load_config(path: Path | str | None = None, root: Path | None = None) -> App
                 owner_name=str(item.get("owner_name", "")),
                 customer_stage=str(item.get("customer_stage", "")),
                 group_type=str(item.get("group_type", "")),
-                common_contacts=[
-                    str(contact) for contact in item.get("common_contacts", [])
-                ],
+                common_contacts=_parse_text_list(item.get("common_contacts", [])),
                 reply_notes=str(item.get("reply_notes", "")),
                 is_whitelisted=_parse_bool(item.get("is_whitelisted", True)),
                 enabled=_parse_bool(item.get("enabled", True)),
@@ -230,19 +236,34 @@ def load_config(path: Path | str | None = None, root: Path | None = None) -> App
                 ),
                 include_in_daily=_parse_bool(item.get("include_in_daily", True)),
                 trial_scope=str(item.get("trial_scope", "最近50条")),
-                internal_people=[
-                    str(person) for person in item.get("internal_people", [])
-                ],
+                internal_people=_parse_text_list(item.get("internal_people", [])),
+                owner_names=_parse_text_list(
+                    item.get("owner_names", item.get("owner_name", ""))
+                ),
+                roster_member_names=_parse_text_list(
+                    item.get("roster_member_names", [])
+                ),
+                archived=_parse_bool(item.get("archived", False)),
             )
             for item in data.get("sessions", [])
             if item.get("external_id")
         ]
+        for session in config.sessions:
+            if session.owner_names:
+                session.owner_name = session.owner_names[0]
+            elif session.owner_name:
+                session.owner_names = _parse_text_list(session.owner_name)
 
     if "internal_people" in data:
         config.internal_people = [
             PersonConfig(
                 person_name=str(item.get("person_name", "")),
-                aliases=[str(alias) for alias in item.get("aliases", [])],
+                aliases=_parse_text_list(item.get("aliases", [])),
+                wechat_display_name=str(item.get("wechat_display_name", "")),
+                role=str(item.get("role", "我方人员")),
+                modules=_parse_text_list(item.get("modules", [])),
+                enabled=_parse_bool(item.get("enabled", True)),
+                notes=str(item.get("notes", "")),
             )
             for item in data.get("internal_people", [])
             if item.get("person_name")
@@ -304,7 +325,11 @@ def session_by_external_id(config: AppConfig) -> dict[str, SessionConfig]:
 def internal_aliases(config: AppConfig) -> set[str]:
     aliases: set[str] = set()
     for person in config.internal_people:
+        if not person.enabled:
+            continue
         aliases.add(person.person_name)
+        if person.wechat_display_name:
+            aliases.add(person.wechat_display_name)
         aliases.update(person.aliases)
     return aliases
 
@@ -391,3 +416,13 @@ def _parse_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+def _parse_text_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        values = value.replace("，", ",").replace("\r", "\n").replace(",", "\n").split("\n")
+    elif isinstance(value, list):
+        values = value
+    else:
+        values = []
+    return [str(item).strip() for item in values if str(item).strip()]

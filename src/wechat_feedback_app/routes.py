@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import json
-from datetime import date
+import sys
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .collector import collect_messages, latest_run
 from .config import AppConfig, PersonConfig, RiskConfig, SessionConfig
@@ -32,7 +33,12 @@ from .exporter import (
     preview_markdown_template,
     redact_visible_text,
 )
-from .wx_cli_adapter import test_connection, wx_cli_readiness
+from .wx_cli_adapter import (
+    WxCliUnavailable,
+    fetch_group_roster_members,
+    test_connection,
+    wx_cli_readiness,
+)
 
 
 def create_app(config: AppConfig):
@@ -73,6 +79,16 @@ def create_app(config: AppConfig):
     def daily_center(control_date: Optional[str] = None):
         return daily_center_payload(config, conn, control_date or date.today().isoformat())
 
+    @app.get("/api/daily-center/generation-status")
+    def daily_generation_status(control_date: Optional[str] = None):
+        return daily_generation_status_payload(
+            config, conn, control_date or date.today().isoformat()
+        )
+
+    @app.post("/api/daily-center/generate")
+    def daily_generate(payload: Optional[dict[str, Any]] = None):
+        return generate_daily_report_payload(config, conn, payload or {})
+
     @app.get("/api/daily-center/settlements")
     def daily_center_settlements():
         return daily_settlement_center_payload(config, conn)
@@ -87,20 +103,54 @@ def create_app(config: AppConfig):
     def monitor_groups():
         return monitor_groups_payload(config)
 
+    @app.get("/api/customer-options")
+    def customer_options():
+        return customer_options_api_payload(config)
+
+    @app.get("/api/customer-suggestions")
+    def customer_suggestions(group_name: Optional[str] = None):
+        return monitor_group_customer_suggestion_payload(config, group_name or "")
+
+    @app.get("/api/customers/suggestions")
+    def customers_suggestions(group_name: Optional[str] = None):
+        return monitor_group_customer_suggestion_payload(config, group_name or "")
+
+    @app.get("/api/monitor-groups/customer-suggestion")
+    def monitor_group_customer_suggestion(group_name: Optional[str] = None):
+        return monitor_group_customer_suggestion_payload(config, group_name or "")
+
+    @app.get("/api/monitor-groups/customer-suggestions")
+    def monitor_group_customer_suggestions(group_name: Optional[str] = None):
+        return monitor_group_customer_suggestion_payload(config, group_name or "")
+
     @app.post("/api/monitor-groups")
     def monitor_group_create(payload: dict[str, Any]):
-        return save_monitor_group_payload(config, payload)
+        return save_monitor_group_payload(config, payload, conn=conn)
 
     @app.get("/api/monitor-groups/{group_id}")
     def monitor_group_detail(group_id: str):
-        payload = monitor_group_detail_payload(config, group_id)
+        payload = monitor_group_detail_payload(config, group_id, conn)
         if payload["status"] == "not_found":
             raise HTTPException(status_code=404, detail="monitor group not found")
         return payload
 
+    @app.post("/api/monitor-groups/{group_id}/refresh-members")
+    def monitor_group_refresh_members(group_id: str):
+        result = refresh_monitor_group_members_payload(config, group_id, conn)
+        if result["status"] == "not_found":
+            raise HTTPException(status_code=404, detail="monitor group not found")
+        return result
+
+    @app.post("/api/monitor-groups/{group_id}/sync-roster")
+    def monitor_group_sync_roster(group_id: str, payload: Optional[dict[str, Any]] = None):
+        result = sync_monitor_group_roster_payload(config, group_id, payload or {}, conn)
+        if result["status"] == "not_found":
+            raise HTTPException(status_code=404, detail="monitor group not found")
+        return result
+
     @app.put("/api/monitor-groups/{group_id}")
     def monitor_group_update(group_id: str, payload: dict[str, Any]):
-        result = save_monitor_group_payload(config, payload, group_id=group_id)
+        result = save_monitor_group_payload(config, payload, group_id=group_id, conn=conn)
         if result["status"] == "not_found":
             raise HTTPException(status_code=404, detail="monitor group not found")
         return result
@@ -111,6 +161,72 @@ def create_app(config: AppConfig):
         if result["status"] == "not_found":
             raise HTTPException(status_code=404, detail="monitor group not found")
         return result
+
+    @app.post("/api/monitor-groups/{group_id}/archive")
+    def monitor_group_archive(group_id: str):
+        result = archive_monitor_group_payload(config, group_id)
+        if result["status"] == "not_found":
+            raise HTTPException(status_code=404, detail="monitor group not found")
+        return result
+
+    @app.post("/api/monitor-groups/{group_id}/delete")
+    def monitor_group_delete(group_id: str, payload: Optional[dict[str, Any]] = None):
+        result = delete_monitor_group_payload(config, group_id, payload or {})
+        if result["status"] == "not_found":
+            raise HTTPException(status_code=404, detail="monitor group not found")
+        return result
+
+    @app.get("/api/internal-people")
+    def internal_people():
+        return internal_people_payload(config, conn)
+
+    @app.post("/api/internal-people/suggestions")
+    def internal_people_suggestions(payload: dict[str, Any]):
+        return internal_people_suggestions_payload(config, conn, payload)
+
+    @app.get("/api/internal-people/suggestions")
+    def internal_people_suggestions_get(
+        query: Optional[str] = None,
+        display_name: Optional[str] = None,
+        name: Optional[str] = None,
+        wechat_id: Optional[str] = None,
+    ):
+        return internal_people_suggestions_payload(
+            config,
+            conn,
+            {
+                "query": query,
+                "display_name": display_name,
+                "name": name,
+                "wechat_id": wechat_id,
+            },
+        )
+
+    @app.post("/api/internal-people")
+    def internal_people_create(payload: dict[str, Any]):
+        return save_internal_person_payload(config, conn, payload)
+
+    @app.put("/api/internal-people/{person_id}")
+    def internal_people_update(person_id: str, payload: dict[str, Any]):
+        result = save_internal_person_payload(config, conn, payload, person_id=person_id)
+        if result["status"] == "not_found":
+            raise HTTPException(status_code=404, detail="person not found")
+        return result
+
+    @app.post("/api/internal-people/{person_id}/disable")
+    def internal_people_disable(person_id: str):
+        result = disable_internal_person_payload(config, conn, person_id)
+        if result["status"] == "not_found":
+            raise HTTPException(status_code=404, detail="person not found")
+        return result
+
+    @app.get("/api/messages/v1")
+    def messages_v1(group_id: Optional[str] = None):
+        return messages_v1_payload(config, conn, group_id or "all")
+
+    @app.get("/api/windows-readiness")
+    def windows_readiness():
+        return windows_readiness_payload(config)
 
     @app.post("/api/collect")
     def collect():
@@ -268,11 +384,11 @@ def create_app(config: AppConfig):
 
     @app.get("/api/config-center")
     def config_center():
-        return config_center_payload(config)
+        return config_center_payload(config, conn)
 
     @app.post("/api/config-center")
     def save_config_center(payload: dict[str, Any]):
-        return save_config_center_payload(config, payload)
+        return save_config_center_payload(config, payload, conn)
 
     @app.post("/api/real-trial/run")
     def real_trial_run(payload: dict[str, Any]):
@@ -579,6 +695,14 @@ def daily_center_payload(
             "new_issue_count": new_issue_count,
             "historical_unfollowed_count": historical_count,
         },
+        "today_focus": daily_center_today_focus_payload(
+            control_date,
+            candidates,
+            historical_items,
+            monitor_count,
+            latest_run(conn),
+            has_report,
+        ),
         "cards": [
             {
                 "label": "日报状态",
@@ -668,6 +792,61 @@ def daily_settlement_center_payload(
         "safety": {
             "formal_write_enabled": False,
             "save_triggers_collection": False,
+        },
+    }
+
+
+def daily_center_today_focus_payload(
+    control_date: str,
+    candidates: list[dict[str, Any]],
+    historical_items: list[dict[str, Any]],
+    monitor_count: int,
+    latest_collection: dict[str, Any],
+    has_report: bool,
+) -> dict[str, Any]:
+    priority_items = list(candidates[:3])
+    if len(priority_items) < 3:
+        priority_items.extend(historical_items[: 3 - len(priority_items)])
+    failure_reason = clean_text(latest_collection.get("error_code")) or clean_text(
+        latest_collection.get("error_message")
+    )
+    headline = (
+        f"今天优先跟进 {len(priority_items)} 条"
+        if priority_items
+        else "今天暂无必须跟进事项"
+    )
+    return {
+        "title": "今天最要跟进",
+        "headline": headline,
+        "status_label": "需要处理" if priority_items else "暂无新负担",
+        "control_date": control_date,
+        "monitor_group_status_label": (
+            f"{monitor_count} 个监控群纳入日报" if monitor_count else "暂无已验证日报监控群"
+        ),
+        "new_issue_count": len(candidates),
+        "historical_unfollowed_count": len(historical_items),
+        "report_status_label": "日报已生成" if has_report else "日报未生成",
+        "failure_reason_label": (
+            f"最近采集失败原因：{redact_visible_text(failure_reason)}"
+            if failure_reason
+            else ""
+        ),
+        "items": [
+            {
+                "display_id": redact_visible_text(item.get("item_code")),
+                "summary_safe": redact_visible_text(
+                    item.get("summary") or item.get("title") or ""
+                ),
+                "home_status_label": candidate_home_status_label(item, set()),
+                "action_label": candidate_home_action_label(
+                    candidate_home_status_label(item, set())
+                ),
+            }
+            for item in priority_items
+        ],
+        "primary_action": {
+            "label": "先处理这些跟进项" if priority_items else "生成/刷新日报",
+            "enabled": True,
         },
     }
 
@@ -793,6 +972,139 @@ def daily_center_actions(has_report: bool, has_draft: bool) -> dict[str, dict[st
             "label": "标记需要重看",
             "enabled": has_report or has_draft,
             "hint": "用于后续人工复核。",
+        },
+    }
+
+
+def daily_generation_status_payload(
+    config: AppConfig, conn: sqlite3.Connection, control_date: str
+) -> dict[str, Any]:
+    draft = latest_draft_for_date(conn, control_date)
+    data_source = resolve_draft_data_source(config, conn, control_date, None)
+    item_count = len(draft_source_items(config, conn, control_date, data_source))
+    generated = bool(draft)
+    feedback_state = "success" if generated else "idle"
+    return {
+        "status": "generated" if generated else "idle",
+        "feedback_state": feedback_state,
+        "running": False,
+        "success": generated,
+        "failed": False,
+        "status_label": "已生成，可查看日报" if generated else "等待生成",
+        "control_date": control_date,
+        "started_at": clean_text(draft.get("generated_at")) if draft else "",
+        "finished_at": clean_text(draft.get("generated_at")) if draft else "",
+        "data_source": data_source,
+        "data_source_label": data_source_label(data_source),
+        "candidate_count": item_count,
+        "next_step_label": (
+            "可继续审阅或重新生成" if generated else "点击生成后会立即返回进度"
+        ),
+        "retry_available": True,
+        "error_code": "",
+        "report_preserved": generated,
+        "old_report_preserved": generated,
+        "safety": {
+            "formal_write_enabled": False,
+            "save_triggers_collection": False,
+            "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+        },
+    }
+
+
+def generate_daily_report_payload(
+    config: AppConfig, conn: sqlite3.Connection, body: dict[str, Any]
+) -> dict[str, Any]:
+    control_date = str(body.get("control_date") or date.today().isoformat())
+    requested_source = body.get("data_source")
+    data_source = resolve_draft_data_source(config, conn, control_date, requested_source)
+    started_at = now_local_iso()
+    latest_before = latest_draft_for_date(conn, control_date)
+    items = draft_source_items(config, conn, control_date, data_source)
+    if not items and latest_before:
+        return {
+            "status": "generated",
+            "feedback_state": "success",
+            "running": False,
+            "success": True,
+            "failed": False,
+            "status_label": "没有新候选，已保留原日报正文",
+            "control_date": control_date,
+            "started_at": started_at,
+            "finished_at": now_local_iso(),
+            "data_source": data_source,
+            "data_source_label": data_source_label(data_source),
+            "candidate_count": 0,
+            "file_path": relative_to_root(
+                config, Path(clean_text(latest_before.get("file_path")))
+            ),
+            "preserved_previous_report": True,
+            "old_report_preserved": True,
+            "report_text_cleared": False,
+            "next_step_label": "可继续查看原日报，或等新候选出现后再生成。",
+            "retry_available": True,
+            "error_code": "",
+            "safety": {
+                "formal_write_enabled": False,
+                "save_triggers_collection": False,
+                "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+            },
+        }
+    try:
+        preview_markdown = render_machine_draft_preview(control_date, data_source, items)
+        file_path = write_machine_draft(
+            config, conn, control_date, data_source, preview_markdown, items
+        )
+    except Exception:
+        return {
+            "status": "failed",
+            "feedback_state": "failed",
+            "running": False,
+            "success": False,
+            "failed": True,
+            "status_label": "生成失败，可重试",
+            "control_date": control_date,
+            "started_at": started_at,
+            "finished_at": now_local_iso(),
+            "data_source": data_source,
+            "data_source_label": data_source_label(data_source),
+            "candidate_count": len(items),
+            "error_code": "daily_generation_failed",
+            "next_step_label": "请重试；如仍失败，再查看本地日志。",
+            "retry_available": True,
+            "preserved_previous_report": bool(latest_before),
+            "old_report_preserved": bool(latest_before),
+            "report_text_cleared": False,
+            "safety": {
+                "formal_write_enabled": False,
+                "save_triggers_collection": False,
+                "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+            },
+        }
+    return {
+        "status": "generated",
+        "feedback_state": "success",
+        "running": False,
+        "success": True,
+        "failed": False,
+        "status_label": "已生成，可查看日报",
+        "control_date": control_date,
+        "started_at": started_at,
+        "finished_at": now_local_iso(),
+        "data_source": data_source,
+        "data_source_label": data_source_label(data_source),
+        "candidate_count": len(items),
+        "file_path": relative_to_root(config, file_path),
+        "preserved_previous_report": bool(latest_before),
+        "old_report_preserved": bool(latest_before),
+        "report_text_cleared": False,
+        "next_step_label": "请审阅日报正文；正式沉淀仍需人工确认。",
+        "retry_available": True,
+        "error_code": "",
+        "safety": {
+            "formal_write_enabled": False,
+            "save_triggers_collection": False,
+            "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
         },
     }
 
@@ -969,7 +1281,7 @@ def group_profile_status(session: SessionConfig | None) -> str:
         return "未配置"
     required = [
         session.customer_name,
-        session.owner_name,
+        primary_owner_name(session),
         session.module_name,
         session.customer_stage,
         session.group_type,
@@ -993,7 +1305,7 @@ def group_profile_payload(session: SessionConfig | None) -> dict[str, Any]:
     return {
         "configured": True,
         "customer_name": session.customer_name,
-        "group_owner": session.owner_name,
+        "group_owner": primary_owner_name(session),
         "module_name": session.module_name,
         "customer_stage": session.customer_stage,
         "group_type": session.group_type,
@@ -1985,18 +2297,44 @@ def write_machine_draft(
 
 def monitor_groups_payload(config: AppConfig) -> dict[str, Any]:
     groups = [monitor_group_public_payload(session) for session in config.sessions]
+    customer_data = customer_options_with_source_payload(config)
+    customer_options = customer_data["options"]
     return {
         "status": "ok",
         "title": "监控群",
         "count": len(groups),
+        "active_count": len([group for group in groups if not group["archived"]]),
+        "archived_count": len([group for group in groups if group["archived"]]),
         "daily_center_count": len(
             [group for group in groups if group["counts_in_daily_center"]]
         ),
+        "customer_options": customer_options,
+        "customer_options_count": len(customer_options),
+        "customer_source_status": customer_data["source_status"],
+        "customer_source_error_code": customer_data["source_error_code"],
+        "customer_option_sources": customer_data["sources"],
+        "customer_match_contract": {
+            "input": "group_name",
+            "outputs": [
+                "suggested_customer_name",
+                "suggested_customer_id",
+                "match_status",
+                "reason_code",
+            ],
+            "manual_status": "needs_manual_selection",
+        },
         "groups": groups,
         "actions": {
             "create": {"label": "新增监控群", "enabled": True},
             "edit": {"label": "保存群档案", "enabled": True},
             "disable": {"label": "停用监控", "enabled": True},
+            "archive": {"label": "归档监控群", "enabled": True, "available": True},
+            "delete": {
+                "label": "删除本地监控群配置",
+                "enabled": True,
+                "available": True,
+                "requires_confirmation": True,
+            },
         },
         "safety": {
             "save_triggers_collection": False,
@@ -2005,23 +2343,264 @@ def monitor_groups_payload(config: AppConfig) -> dict[str, Any]:
     }
 
 
-def monitor_group_detail_payload(config: AppConfig, group_id: str) -> dict[str, Any]:
+def monitor_group_customer_suggestion_payload(
+    config: AppConfig,
+    group_name: str,
+    *,
+    strawberry_loader: Callable[[], list[Any]] | None = None,
+) -> dict[str, Any]:
+    customer_data = customer_options_with_source_payload(
+        config, strawberry_loader=strawberry_loader
+    )
+    customer_options = customer_data["options"]
+    suggestion = customer_suggestion_from_options(group_name, customer_options)
+    return {
+        "status": "ok",
+        "query_configured": bool(clean_text(group_name)),
+        "customer_options_count": len(customer_options),
+        "customer_source_status": customer_data["source_status"],
+        "customer_source_error_code": customer_data["source_error_code"],
+        "customer_option_sources": customer_data["sources"],
+        "suggestion": suggestion,
+        "suggested_customer_name": suggestion["suggested_customer_name"],
+        "suggested_customer_id": suggestion["suggested_customer_id"],
+        "match_status": suggestion["match_status"],
+        "reason_code": suggestion["reason_code"],
+        "safety": {
+            "save_triggers_collection": False,
+            "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+            "no_real_read_executed": True,
+        },
+    }
+
+
+def customer_options_api_payload(
+    config: AppConfig,
+    *,
+    strawberry_loader: Callable[[], list[Any]] | None = None,
+) -> dict[str, Any]:
+    customer_data = customer_options_with_source_payload(
+        config, strawberry_loader=strawberry_loader
+    )
+    options = customer_data["options"]
+    return {
+        "status": "ok",
+        "count": len(options),
+        "customer_options_count": len(options),
+        "source_status": customer_data["source_status"],
+        "source_error_code": customer_data["source_error_code"],
+        "sources": customer_data["sources"],
+        "options": options,
+        "customer_options": options,
+        "source_label": "本地配置客户 / 草莓客户系统只读客户源",
+        "safety": {
+            "save_triggers_collection": False,
+            "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+            "no_real_read_executed": True,
+        },
+    }
+
+
+def monitor_group_detail_payload(
+    config: AppConfig, group_id: str, conn: sqlite3.Connection | None = None
+) -> dict[str, Any]:
     session = find_monitor_group(config, group_id)
     if session is None:
         return {"status": "not_found", "group": {}}
+    member_options = monitor_group_member_options(conn, session, config)
     return {
         "status": "ok",
-        "group": monitor_group_public_payload(session, detail=True),
+        "group": monitor_group_public_payload(
+            session, detail=True, member_options=member_options
+        ),
         "field_options": monitor_group_field_options(config),
+        "customer_options": customer_options_payload(config),
+        "customer_suggestion": customer_suggestion_payload(
+            session.display_name, config
+        ),
+        "member_options": member_options,
+        "member_name_options": member_options["names"],
         "safety": {
             "save_triggers_collection": False,
             "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
         },
+    }
+
+
+def refresh_monitor_group_members_payload(
+    config: AppConfig,
+    group_id: str,
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    session = find_monitor_group(config, group_id)
+    if session is None:
+        return {"status": "not_found", "member_options": empty_monitor_group_member_options()}
+    member_options = monitor_group_member_options(conn, session, config)
+    count = int(member_options["count"])
+    return {
+        "status": "refreshed" if count else "empty",
+        "scope": member_options["scope"],
+        "refresh_status": member_options["refresh_status"],
+        "refresh_label": member_options["refresh_label"],
+        "member_count": count,
+        "available_count": int(member_options["available_count"]),
+        "appeared_count": int(member_options["appeared_count"]),
+        "roster_count": int(member_options["roster_count"]),
+        "expected_count": member_options["expected_count"],
+        "roster_status": member_options["roster_status"],
+        "roster_status_label": member_options["roster_status_label"],
+        "member_options": member_options,
+        "member_name_options": member_options["names"],
+        "full_sync_available": bool(member_options["full_sync_available"]),
+        "full_sync_requires_authorization": bool(
+            member_options["full_sync_requires_authorization"]
+        ),
+        "full_sync_status_label": member_options["full_sync_status_label"],
+        "sync_action_label": member_options["sync_action_label"],
+        "safety": {
+            "save_triggers_collection": False,
+            "real_read_enabled": bool(config.wx_cli.real_read_enabled),
+            "no_real_read_executed": True,
+        },
+    }
+
+
+def sync_monitor_group_roster_payload(
+    config: AppConfig,
+    group_id: str,
+    payload: dict[str, Any] | None = None,
+    conn: sqlite3.Connection | None = None,
+    *,
+    runner: Any | None = None,
+) -> dict[str, Any]:
+    session = find_monitor_group(config, group_id)
+    if session is None:
+        return {"status": "not_found", "member_options": empty_monitor_group_member_options()}
+    body = payload or {}
+    appeared_options = monitor_group_member_options(conn, session, config)
+    appeared_summary = monitor_group_member_options_summary(appeared_options)
+    authorized = parse_bool(body.get("authorize_full_roster_sync"), False)
+    if not authorized:
+        return {
+            "status": "authorization_required",
+            "scope": appeared_options["scope"],
+            "member_options": appeared_summary,
+            "available_count": int(appeared_options["available_count"]),
+            "appeared_count": int(appeared_options["appeared_count"]),
+            "roster_count": 0,
+            "expected_count": None,
+            "full_sync_available": bool(appeared_options["full_sync_available"]),
+            "full_sync_requires_authorization": True,
+            "roster_status": ROSTER_AUTH_REQUIRED_STATUS,
+            "roster_status_label": ROSTER_AUTH_REQUIRED_LABEL,
+            "sync_action_label": appeared_options["sync_action_label"],
+            "safety": {
+                "save_triggers_collection": False,
+                "real_read_enabled": bool(config.wx_cli.real_read_enabled),
+                "no_message_read_executed": True,
+                "no_roster_read_executed": True,
+            },
+        }
+    try:
+        roster_members = fetch_group_roster_members(
+            config,
+            session,
+            authorized=True,
+            runner=runner,
+        )
+    except WxCliUnavailable as exc:
+        return {
+            "status": "blocked",
+            "error_code": exc.code,
+            "scope": appeared_options["scope"],
+            "member_options": appeared_summary,
+            "available_count": int(appeared_options["available_count"]),
+            "appeared_count": int(appeared_options["appeared_count"]),
+            "roster_count": 0,
+            "expected_count": None,
+            "full_sync_available": bool(appeared_options["full_sync_available"]),
+            "full_sync_requires_authorization": bool(
+                appeared_options["full_sync_requires_authorization"]
+            ),
+            "roster_status": exc.code,
+            "roster_status_label": clean_text(exc.message) or ROSTER_UNAVAILABLE_LABEL,
+            "sync_action_label": appeared_options["sync_action_label"],
+            "safety": {
+                "save_triggers_collection": False,
+                "real_read_enabled": bool(config.wx_cli.real_read_enabled),
+                "no_message_read_executed": True,
+                "no_roster_read_executed": False,
+            },
+        }
+    roster_names = unique_safe_member_names(
+        [member.display_name for member in roster_members]
+    )
+    session.roster_member_names = unique_safe_member_names_for_session(
+        roster_names, session
+    )
+    config.wx_cli.real_read_enabled = False
+    write_config_center_yaml(config)
+    member_options = monitor_group_member_option_payload(
+        appeared_options["appeared_members"],
+        session=session,
+        roster_names=session.roster_member_names,
+        roster_capability=roster_sync_capability_payload(config),
+    )
+    return {
+        "status": "synced" if roster_names else "empty_roster",
+        "scope": member_options["scope"],
+        "member_options": member_options,
+        "member_name_options": member_options["names"],
+        "available_count": int(member_options["available_count"]),
+        "appeared_count": int(member_options["appeared_count"]),
+        "roster_count": int(member_options["roster_count"]),
+        "expected_count": member_options["expected_count"],
+        "full_sync_available": bool(member_options["full_sync_available"]),
+        "full_sync_requires_authorization": bool(
+            member_options["full_sync_requires_authorization"]
+        ),
+        "roster_status": member_options["roster_status"],
+        "roster_status_label": member_options["roster_status_label"],
+        "sync_action_label": member_options["sync_action_label"],
+        "safety": {
+            "save_triggers_collection": False,
+            "real_read_enabled": bool(config.wx_cli.real_read_enabled),
+            "no_message_read_executed": True,
+            "no_roster_read_executed": False,
+        },
+    }
+
+
+def monitor_group_member_options_summary(options: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scope": options.get("scope"),
+        "complete": bool(options.get("complete")),
+        "status_label": options.get("status_label"),
+        "source_label": options.get("source_label"),
+        "count": int(options.get("count") or 0),
+        "available_count": int(options.get("available_count") or 0),
+        "appeared_count": int(options.get("appeared_count") or 0),
+        "roster_count": int(options.get("roster_count") or 0),
+        "expected_count": options.get("expected_count"),
+        "refresh_status": options.get("refresh_status"),
+        "roster_status": options.get("roster_status"),
+        "roster_status_label": options.get("roster_status_label"),
+        "full_sync_available": bool(options.get("full_sync_available")),
+        "full_sync_requires_authorization": bool(
+            options.get("full_sync_requires_authorization")
+        ),
+        "full_sync_status_label": options.get("full_sync_status_label"),
+        "sync_action_label": options.get("sync_action_label"),
     }
 
 
 def save_monitor_group_payload(
-    config: AppConfig, payload: dict[str, Any], group_id: str | None = None
+    config: AppConfig,
+    payload: dict[str, Any],
+    group_id: str | None = None,
+    conn: sqlite3.Connection | None = None,
+    *,
+    roster_runner: Any | None = None,
 ) -> dict[str, Any]:
     session = find_monitor_group(config, group_id) if group_id else None
     if group_id and session is None:
@@ -2037,6 +2616,7 @@ def save_monitor_group_payload(
         }
     if session is None:
         session = find_monitor_group_by_name(config, group_name)
+    created = session is None
     if session is None:
         session = SessionConfig(
             external_id=local_monitor_external_id(group_name),
@@ -2044,11 +2624,22 @@ def save_monitor_group_payload(
         )
         config.sessions.append(session)
 
+    customer_options = customer_options_payload(config)
+    customer_suggestion = customer_suggestion_from_options(group_name, customer_options)
+    selected_customer = resolve_customer_selection(payload, customer_options)
+    customer_name = selected_customer["customer_name"] or clean_text(
+        payload.get("customer_name")
+    )
+    if not customer_name and customer_suggestion["match_status"] == "matched":
+        customer_name = customer_suggestion["suggested_customer_name"]
+
     session.display_name = group_name
-    session.customer_name = clean_text(payload.get("customer_name"))
+    session.customer_name = customer_name
     session.channel_name = clean_text(payload.get("channel_name"))
     session.module_name = clean_text(payload.get("module_name"))
-    session.owner_name = clean_text(payload.get("owner_name"))
+    owner_names = clean_text_list(payload.get("owner_names", payload.get("owner_name")))
+    session.owner_names = owner_names
+    session.owner_name = owner_names[0] if owner_names else clean_text(payload.get("owner_name"))
     session.customer_stage = clean_text(payload.get("customer_stage"))
     session.group_type = clean_text(payload.get("group_type")) or "测试群"
     session.common_contacts = clean_text_list(payload.get("common_contacts"))
@@ -2064,13 +2655,64 @@ def save_monitor_group_payload(
     session.include_in_daily = parse_bool(payload.get("include_in_daily"), False)
     session.trial_scope = clean_text(payload.get("trial_scope")) or "最近50条"
     session.internal_people = clean_text_list(payload.get("internal_people"))
+    session.archived = parse_bool(payload.get("archived"), bool(getattr(session, "archived", False)))
+    if session.archived:
+        session.enabled = False
+        session.daily_monitor_enabled = False
+        session.include_in_daily = False
     config.wx_cli.real_read_enabled = False
     write_config_center_yaml(config)
-    return {
+    initial_roster_sync: dict[str, Any] | None = None
+    if created:
+        initial_roster_sync_result = sync_monitor_group_roster_payload(
+            config,
+            monitor_group_public_id(session),
+            {
+                "authorize_full_roster_sync": parse_bool(
+                    payload.get("authorize_full_roster_sync_on_create"), False
+                )
+            },
+            conn,
+            runner=roster_runner,
+        )
+        initial_roster_sync = roster_sync_result_summary(initial_roster_sync_result)
+    member_options = monitor_group_member_options(conn, session, config)
+    result = {
         "status": "saved",
-        "group": monitor_group_public_payload(session, detail=True),
+        "group": monitor_group_public_payload(
+            session, detail=True, member_options=member_options
+        ),
+        "member_options": member_options,
+        "member_name_options": member_options["names"],
+        "customer_suggestion": customer_suggestion,
+        "customer_options_count": len(customer_options),
         "real_read_enabled": False,
         "save_triggers_collection": False,
+    }
+    if initial_roster_sync is not None:
+        result["initial_roster_sync"] = initial_roster_sync
+    return result
+
+
+def roster_sync_result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    options = result.get("member_options")
+    return {
+        "status": result.get("status"),
+        "error_code": result.get("error_code", ""),
+        "scope": result.get("scope"),
+        "complete": bool(options.get("complete")) if isinstance(options, dict) else False,
+        "available_count": int(result.get("available_count") or 0),
+        "appeared_count": int(result.get("appeared_count") or 0),
+        "roster_count": int(result.get("roster_count") or 0),
+        "expected_count": result.get("expected_count"),
+        "full_sync_available": bool(result.get("full_sync_available")),
+        "full_sync_requires_authorization": bool(
+            result.get("full_sync_requires_authorization")
+        ),
+        "roster_status": result.get("roster_status"),
+        "roster_status_label": result.get("roster_status_label"),
+        "sync_action_label": result.get("sync_action_label"),
+        "safety": result.get("safety", {}),
     }
 
 
@@ -2090,16 +2732,102 @@ def disable_monitor_group_payload(config: AppConfig, group_id: str) -> dict[str,
     }
 
 
+def archive_monitor_group_payload(config: AppConfig, group_id: str) -> dict[str, Any]:
+    session = find_monitor_group(config, group_id)
+    if session is None:
+        return {"status": "not_found", "group": {}}
+    session.archived = True
+    session.enabled = False
+    session.daily_monitor_enabled = False
+    session.include_in_daily = False
+    config.wx_cli.real_read_enabled = False
+    write_config_center_yaml(config)
+    return {
+        "status": "archived",
+        "group": monitor_group_public_payload(session, detail=True),
+        "counts": monitor_group_collection_summary(config),
+        "real_read_enabled": False,
+        "save_triggers_collection": False,
+        "safety": monitor_group_mutation_safety(config),
+    }
+
+
+def delete_monitor_group_payload(
+    config: AppConfig, group_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    session = find_monitor_group(config, group_id)
+    if session is None:
+        return {"status": "not_found", "group": {}}
+    confirmed = parse_bool(
+        payload.get("confirm_delete", payload.get("confirmed")), False
+    )
+    if not confirmed:
+        return {
+            "status": "confirmation_required",
+            "requires_confirmation": True,
+            "group_id": group_id,
+            "delete_label": "再次确认后删除本地监控群配置",
+            "deleted": False,
+            "counts": monitor_group_collection_summary(config),
+            "safety": monitor_group_mutation_safety(config),
+        }
+    config.sessions = [
+        item for item in config.sessions if monitor_group_public_id(item) != group_id
+    ]
+    config.wx_cli.real_read_enabled = False
+    write_config_center_yaml(config)
+    return {
+        "status": "deleted",
+        "requires_confirmation": False,
+        "deleted": True,
+        "deleted_group_id": group_id,
+        "counts": monitor_group_collection_summary(config),
+        "real_read_enabled": False,
+        "save_triggers_collection": False,
+        "safety": monitor_group_mutation_safety(config),
+    }
+
+
+def monitor_group_collection_summary(config: AppConfig) -> dict[str, int]:
+    return {
+        "total_count": len(config.sessions),
+        "active_count": len(
+            [session for session in config.sessions if not bool(getattr(session, "archived", False))]
+        ),
+        "archived_count": len(
+            [session for session in config.sessions if bool(getattr(session, "archived", False))]
+        ),
+        "daily_center_count": daily_center_monitor_group_count(config),
+    }
+
+
+def monitor_group_mutation_safety(config: AppConfig) -> dict[str, Any]:
+    return {
+        "save_triggers_collection": False,
+        "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+        "real_read_enabled": bool(config.wx_cli.real_read_enabled),
+        "external_system_write": False,
+        "formal_write_enabled": False,
+        "local_config_only": True,
+    }
+
+
 def monitor_group_public_payload(
-    session: SessionConfig, *, detail: bool = False
+    session: SessionConfig,
+    *,
+    detail: bool = False,
+    member_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     verification = safe_verification_status(session.verification_status)
     counts = monitor_group_counts_in_daily_center(session)
+    archived = bool(getattr(session, "archived", False))
     payload: dict[str, Any] = {
         "group_id": monitor_group_public_id(session),
         "group_name": redact_visible_text(session.display_name),
+        "archived": archived,
         "enabled": bool(session.enabled),
         "enabled_label": "启用" if session.enabled else "停用",
+        "status_label": monitor_group_status_label(session),
         "verification_status": verification,
         "verification_label": monitor_group_verification_label(verification),
         "daily_monitor_enabled": bool(session.daily_monitor_enabled),
@@ -2109,21 +2837,33 @@ def monitor_group_public_payload(
         "include_in_daily": bool(session.include_in_daily),
         "include_daily_label": "纳入日报" if session.include_in_daily else "不纳入日报",
         "counts_in_daily_center": counts,
+        "customer_name": redact_visible_text(session.customer_name),
+        "customer_id": local_customer_id(session.customer_name),
+        "customer_match": customer_suggestion_payload(session.display_name, None, [session.customer_name]),
         "group_type": redact_visible_text(session.group_type),
         "module_name": redact_visible_text(session.module_name),
         "customer_stage": redact_visible_text(session.customer_stage),
-        "owner_label": redact_visible_text(session.owner_name) or "待指定负责人",
+        "owner_label": redact_visible_text(primary_owner_name(session)) or "待指定负责人",
         "configuration_status_label": monitor_group_configuration_label(session),
         "can_edit": True,
-        "can_disable": bool(session.enabled),
-        "can_trial_read": bool(session.enabled),
+        "can_disable": bool(session.enabled and not archived),
+        "can_archive": not archived,
+        "can_delete": True,
+        "delete_requires_confirmation": True,
+        "archive_action_label": "归档监控群",
+        "delete_action_label": "删除本地监控群配置",
+        "can_trial_read": bool(session.enabled and not archived),
     }
     if detail:
         payload.update(
             {
                 "customer_name": redact_visible_text(session.customer_name),
+                "customer_id": local_customer_id(session.customer_name),
                 "channel_name": redact_visible_text(session.channel_name),
-                "owner_name": redact_visible_text(session.owner_name),
+                "owner_name": redact_visible_text(primary_owner_name(session)),
+                "owner_names": [
+                    redact_visible_text(person) for person in normalized_owner_names(session)
+                ],
                 "common_contacts": [
                     redact_visible_text(contact) for contact in session.common_contacts
                 ],
@@ -2132,6 +2872,8 @@ def monitor_group_public_payload(
                 ],
                 "trial_scope": redact_visible_text(session.trial_scope) or "最近50条",
                 "reply_notes": redact_visible_text(session.reply_notes),
+                "member_options": member_options or empty_monitor_group_member_options(),
+                "member_name_options": (member_options or empty_monitor_group_member_options())["names"],
             }
         )
     return payload
@@ -2140,6 +2882,7 @@ def monitor_group_public_payload(
 def monitor_group_field_options(config: AppConfig) -> dict[str, list[str]]:
     return {
         "group_types": ["测试群", "客户群", "渠道群", "内部群"],
+        "customers": [option["customer_name"] for option in customer_options_payload(config)],
         "modules": sorted(
             {session.module_name for session in config.sessions if session.module_name}
             | {"售后", "订单", "电商设计", "渠道"}
@@ -2148,10 +2891,355 @@ def monitor_group_field_options(config: AppConfig) -> dict[str, list[str]]:
         "owners": sorted(
             {person.person_name for person in config.internal_people if person.person_name}
             | {session.owner_name for session in config.sessions if session.owner_name}
+            | {
+                owner
+                for session in config.sessions
+                for owner in normalized_owner_names(session)
+            }
         ),
         "trial_scopes": ["最近50条", "指定时间段"],
         "verification_statuses": ["待验证", "已验证"],
     }
+
+
+APPEARED_MEMBER_SCOPE = "appeared_members"
+ROSTER_MEMBER_SCOPE = "roster_members"
+APPEARED_MEMBER_SOURCE_LABEL = "本地已出现成员（不是全员名单）"
+ROSTER_MEMBER_SOURCE_LABEL = "微信群全员名单"
+ROSTER_UNAVAILABLE_STATUS = "need_wx_cli_roster_capability"
+ROSTER_AUTH_REQUIRED_STATUS = "authorization_required"
+ROSTER_SYNCED_STATUS = "synced"
+ROSTER_UNAVAILABLE_LABEL = "完整群成员名单需要真实 wx-cli members 能力或 WeChat 元数据只读接口。"
+ROSTER_AUTH_REQUIRED_LABEL = "已定位到微信群全员名单能力；需用户点击同步并授权后才读取完整名单。"
+ROSTER_SYNCED_LABEL = "已同步微信群全员名单；仅返回昵称级显示文本。"
+MONITOR_GROUP_MEMBER_ROLE_LABELS = {
+    "group_owner": "群负责人",
+    "common_contact": "常用联系人",
+    "internal_person": "我方人员",
+}
+MONITOR_GROUP_MEMBER_ROLE_TARGETS = {
+    "group_owner": "owner_names",
+    "common_contact": "common_contacts",
+    "internal_person": "internal_people",
+}
+
+
+def empty_monitor_group_member_options() -> dict[str, Any]:
+    return monitor_group_member_option_payload([])
+
+
+def monitor_group_member_option_payload(
+    appeared_names: list[str],
+    session: SessionConfig | None = None,
+    *,
+    roster_names: list[str] | None = None,
+    roster_capability: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    safe_appeared_names = (
+        unique_safe_member_names_for_session(appeared_names, session)
+        if session is not None
+        else unique_safe_member_names(appeared_names)
+    )
+    safe_roster_names = (
+        unique_safe_member_names_for_session(roster_names or [], session)
+        if session is not None
+        else unique_safe_member_names(roster_names or [])
+    )
+    has_roster = bool(safe_roster_names)
+    names = safe_roster_names if has_roster else safe_appeared_names
+    available_count = len(names)
+    appeared_count = len(safe_appeared_names)
+    roster_count = len(safe_roster_names)
+    capability = roster_capability or roster_sync_capability_payload(None)
+    roster_status = (
+        ROSTER_SYNCED_STATUS if has_roster else str(capability["roster_status"])
+    )
+    roster_status_label = (
+        ROSTER_SYNCED_LABEL if has_roster else str(capability["roster_status_label"])
+    )
+    full_sync_available = bool(capability["full_sync_available"])
+    full_sync_requires_authorization = bool(
+        capability["full_sync_requires_authorization"]
+    )
+    status_label = (
+        ROSTER_SYNCED_LABEL
+        if has_roster
+        else (
+            "当前只列出本地已出现 / 已保存成员，不是微信群全员名单；"
+            f"{roster_status_label}"
+            if names
+            else f"暂无本地已出现成员；{roster_status_label}"
+        )
+    )
+    refresh_status = "local_rebuilt" if names else "empty_local_sources"
+    role_sets = monitor_group_member_role_sets(session)
+    items = [
+        monitor_group_member_option_item(name, role_sets)
+        for name in names
+    ]
+    return {
+        "scope": ROSTER_MEMBER_SCOPE if has_roster else APPEARED_MEMBER_SCOPE,
+        "complete": has_roster,
+        "status_label": status_label,
+        "source_label": (
+            ROSTER_MEMBER_SOURCE_LABEL if has_roster else APPEARED_MEMBER_SOURCE_LABEL
+        ),
+        "count": available_count,
+        "available_count": available_count,
+        "appeared_count": appeared_count,
+        "roster_count": roster_count,
+        "expected_count": roster_count if has_roster else None,
+        "names": names,
+        "items": items,
+        "role_labels": MONITOR_GROUP_MEMBER_ROLE_LABELS,
+        "role_field_targets": MONITOR_GROUP_MEMBER_ROLE_TARGETS,
+        "appeared_members": safe_appeared_names,
+        "roster_members": safe_roster_names,
+        "full_members": safe_roster_names,
+        "refresh_available": True,
+        "refresh_label": "刷新本地已出现成员",
+        "refresh_status": refresh_status,
+        "roster_refresh_available": full_sync_available,
+        "roster_status": roster_status,
+        "roster_status_label": roster_status_label,
+        "full_sync_available": full_sync_available,
+        "full_sync_requires_authorization": full_sync_requires_authorization,
+        "full_sync_status_label": roster_status_label,
+        "sync_action_label": (
+            "重新同步微信群全员名单" if has_roster else "同步微信群全员名单"
+        ),
+    }
+
+
+def monitor_group_member_options(
+    conn: sqlite3.Connection | None,
+    session: SessionConfig,
+    config: AppConfig | None = None,
+) -> dict[str, Any]:
+    names: list[str] = []
+    if conn is not None:
+        names.extend(local_message_member_names(conn, session))
+    if config is not None:
+        names.extend(latest_trial_member_names(config, session))
+    names.extend(normalized_owner_names(session))
+    names.extend(session.common_contacts)
+    names.extend(session.internal_people)
+    roster_names = list(getattr(session, "roster_member_names", []) or [])
+    safe_names = unique_safe_member_names_for_session(names, session)
+    return monitor_group_member_option_payload(
+        safe_names,
+        session=session,
+        roster_names=roster_names,
+        roster_capability=roster_sync_capability_payload(config),
+    )
+
+
+def roster_sync_capability_payload(config: AppConfig | None) -> dict[str, Any]:
+    if config is None:
+        return {
+            "full_sync_available": False,
+            "full_sync_requires_authorization": False,
+            "roster_status": ROSTER_UNAVAILABLE_STATUS,
+            "roster_status_label": ROSTER_UNAVAILABLE_LABEL,
+        }
+    if config.wx_cli.mode != "real":
+        return {
+            "full_sync_available": False,
+            "full_sync_requires_authorization": False,
+            "roster_status": "real_mode_required",
+            "roster_status_label": "完整群成员同步需要真实 wx-cli 模式；当前不会执行。",
+        }
+    readiness = wx_cli_readiness(config)
+    if readiness["status"] != "ok":
+        return {
+            "full_sync_available": False,
+            "full_sync_requires_authorization": False,
+            "roster_status": readiness["status"],
+            "roster_status_label": ROSTER_UNAVAILABLE_LABEL,
+        }
+    return {
+        "full_sync_available": True,
+        "full_sync_requires_authorization": True,
+        "roster_status": ROSTER_AUTH_REQUIRED_STATUS,
+        "roster_status_label": ROSTER_AUTH_REQUIRED_LABEL,
+    }
+
+
+def unique_safe_member_names_for_session(
+    values: list[Any],
+    session: SessionConfig,
+) -> list[str]:
+    excluded = monitor_group_member_excluded_names(session)
+    return [
+        name
+        for name in unique_safe_member_names(values)
+        if name not in excluded
+    ]
+
+
+def monitor_group_member_excluded_names(session: SessionConfig) -> set[str]:
+    return set(
+        unique_safe_member_names(
+            [
+                session.display_name,
+                session.external_id,
+                session.channel_name,
+            ]
+        )
+    )
+
+
+def monitor_group_member_role_sets(
+    session: SessionConfig | None,
+) -> dict[str, set[str]]:
+    if session is None:
+        return {role: set() for role in MONITOR_GROUP_MEMBER_ROLE_LABELS}
+    return {
+        "group_owner": set(unique_safe_member_names(normalized_owner_names(session))),
+        "common_contact": set(unique_safe_member_names(session.common_contacts)),
+        "internal_person": set(unique_safe_member_names(session.internal_people)),
+    }
+
+
+def monitor_group_member_option_item(
+    name: str,
+    role_sets: dict[str, set[str]],
+) -> dict[str, Any]:
+    selected_roles = [
+        role
+        for role in MONITOR_GROUP_MEMBER_ROLE_LABELS
+        if name in role_sets.get(role, set())
+    ]
+    role_flags = {
+        role: role in selected_roles
+        for role in MONITOR_GROUP_MEMBER_ROLE_LABELS
+    }
+    return {
+        "value": name,
+        "label": name,
+        "selected_roles": selected_roles,
+        "selected_role_labels": [
+            MONITOR_GROUP_MEMBER_ROLE_LABELS[role] for role in selected_roles
+        ],
+        "role_flags": role_flags,
+    }
+
+
+def local_message_member_names(
+    conn: sqlite3.Connection, session: SessionConfig
+) -> list[str]:
+    names = exact_session_member_names(conn, session)
+    if names:
+        return names
+    return single_session_member_names(conn)
+
+
+def latest_trial_member_names(config: AppConfig, session: SessionConfig) -> list[str]:
+    latest_db = latest_real_trial_db(Path(config.root) / "data")
+    if latest_db is None:
+        return []
+    try:
+        uri = f"file:{latest_db}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            names = exact_session_member_names(conn, session)
+            if names:
+                return names
+            return single_session_member_names(conn)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+
+def exact_session_member_names(
+    conn: sqlite3.Connection, session: SessionConfig
+) -> list[str]:
+    try:
+        rows = conn.execute(
+            """
+            select distinct rm.sender_display_name
+            from raw_messages rm
+            join sessions s on s.id = rm.session_id
+            where s.external_id = ? or s.display_name = ?
+            order by rm.sender_display_name
+            """,
+            (session.external_id, session.display_name),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [str(row["sender_display_name"] or "") for row in rows]
+
+
+def single_session_member_names(conn: sqlite3.Connection) -> list[str]:
+    try:
+        session_count = conn.execute(
+            """
+            select count(distinct session_id) as count
+            from raw_messages
+            """
+        ).fetchone()["count"]
+        if int(session_count or 0) != 1:
+            return []
+        rows = conn.execute(
+            """
+            select distinct sender_display_name
+            from raw_messages
+            order by sender_display_name
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [str(row["sender_display_name"] or "") for row in rows]
+
+
+def normalized_owner_names(session: SessionConfig) -> list[str]:
+    names = list(getattr(session, "owner_names", []) or [])
+    if session.owner_name:
+        names.insert(0, session.owner_name)
+    return unique_clean_text(names)
+
+
+def primary_owner_name(session: SessionConfig) -> str:
+    names = normalized_owner_names(session)
+    return names[0] if names else ""
+
+
+def unique_safe_member_names(values: list[Any]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        name = safe_member_display_name(value)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def safe_member_display_name(value: Any) -> str:
+    display = safe_sender_display(value)
+    if not display or display == "未解析微信名":
+        return ""
+    redacted = redact_visible_text(display)
+    if "[敏感信息已脱敏]" in redacted or "[路径已脱敏]" in redacted:
+        return ""
+    lowered = redacted.lower()
+    if any(token in lowered for token in ["wxid", "key", "salt", "daemon"]):
+        return ""
+    return redacted
+
+
+def unique_clean_text(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = clean_text(value)
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
 
 
 def find_monitor_group(config: AppConfig, group_id: str | None) -> SessionConfig | None:
@@ -2191,6 +3279,465 @@ def local_monitor_external_id(group_name: str) -> str:
     return f"local-monitor-{digest}"
 
 
+def local_customer_id(customer_name: Any) -> str:
+    name = safe_customer_name(customer_name)
+    if not name:
+        return ""
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+    return f"customer-{digest}"
+
+
+def safe_customer_name(value: Any) -> str:
+    name = redact_visible_text(clean_text(value))
+    if not name or "[敏感信息已脱敏]" in name or "[路径已脱敏]" in name:
+        return ""
+    lowered = name.lower()
+    if any(token in lowered for token in ["wxid", "key", "salt", "daemon"]):
+        return ""
+    return name
+
+
+STRAWBERRY_CUSTOMER_PROJECT_ROOT = Path.home() / "Desktop" / "主业--草莓客户管理系统"
+STRAWBERRY_CUSTOMER_SOURCE = "strawberry_customer_system"
+LOCAL_CUSTOMER_SOURCE = "local_config"
+
+
+def customer_options_with_source_payload(
+    config: AppConfig | None,
+    *,
+    strawberry_loader: Callable[[], list[Any]] | None = None,
+) -> dict[str, Any]:
+    local_options = local_customer_options_payload(config)
+    if strawberry_loader is None and not default_strawberry_source_enabled(config):
+        strawberry_source = strawberry_customer_source_error("source_disabled_for_test_root")
+    else:
+        strawberry_source = strawberry_customer_source_payload(strawberry_loader)
+    options = merge_customer_options(local_options, strawberry_source["options"])
+    source_summary = [
+        {
+            "source": LOCAL_CUSTOMER_SOURCE,
+            "source_label": "本项目本地配置",
+            "status": "ok",
+            "count": len(local_options),
+            "error_code": "",
+        },
+        {
+            "source": STRAWBERRY_CUSTOMER_SOURCE,
+            "source_label": "草莓客户系统只读客户源",
+            "status": strawberry_source["status"],
+            "count": strawberry_source["count"],
+            "error_code": strawberry_source["error_code"],
+        },
+    ]
+    source_status = (
+        "ok" if strawberry_source["status"] == "ok" else "partial"
+    )
+    return {
+        "options": options,
+        "count": len(options),
+        "customer_options_count": len(options),
+        "source_status": source_status,
+        "source_error_code": strawberry_source["error_code"],
+        "sources": source_summary,
+    }
+
+
+def default_strawberry_source_enabled(config: AppConfig | None) -> bool:
+    if config is None:
+        return False
+    try:
+        return Path(config.root).resolve() == Path.cwd().resolve()
+    except OSError:
+        return False
+
+
+def customer_options_payload(
+    config: AppConfig | None,
+    *,
+    strawberry_loader: Callable[[], list[Any]] | None = None,
+) -> list[dict[str, Any]]:
+    return customer_options_with_source_payload(
+        config, strawberry_loader=strawberry_loader
+    )["options"]
+
+
+def local_customer_options_payload(config: AppConfig | None) -> list[dict[str, Any]]:
+    if config is None:
+        return []
+    counts: dict[str, int] = {}
+    first_seen_order: list[str] = []
+    for session in config.sessions:
+        customer_name = safe_customer_name(session.customer_name)
+        if not customer_name:
+            continue
+        if customer_name not in counts:
+            first_seen_order.append(customer_name)
+        counts[customer_name] = counts.get(customer_name, 0) + 1
+    return [
+        {
+            "customer_id": local_customer_id(customer_name),
+            "customer_name": customer_name,
+            "label": customer_name,
+            "source_label": "本地配置客户",
+            "source_count": counts[customer_name],
+            "source": LOCAL_CUSTOMER_SOURCE,
+        }
+        for customer_name in sorted(first_seen_order)
+    ]
+
+
+def strawberry_customer_source_payload(
+    loader: Callable[[], list[Any]] | None = None,
+) -> dict[str, Any]:
+    try:
+        records = loader() if loader is not None else load_strawberry_customer_records()
+    except FileNotFoundError:
+        return strawberry_customer_source_error("source_path_missing")
+    except ModuleNotFoundError:
+        return strawberry_customer_source_error("source_module_unavailable")
+    except Exception:
+        return strawberry_customer_source_error("source_read_failed")
+    options = strawberry_customer_options_from_records(records)
+    return {
+        "status": "ok",
+        "error_code": "",
+        "count": len(options),
+        "options": options,
+    }
+
+
+def strawberry_customer_source_error(error_code: str) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "error_code": error_code,
+        "count": 0,
+        "options": [],
+    }
+
+
+def load_strawberry_customer_records() -> list[Any]:
+    source_dir = STRAWBERRY_CUSTOMER_PROJECT_ROOT / "src"
+    if not source_dir.exists():
+        raise FileNotFoundError("strawberry customer source missing")
+    inserted = False
+    source_text = str(source_dir)
+    if source_text not in sys.path:
+        sys.path.insert(0, source_text)
+        inserted = True
+    try:
+        from strawberry_customer_management.markdown_store import MarkdownCustomerStore
+
+        return MarkdownCustomerStore().list_customers()
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(source_text)
+            except ValueError:
+                pass
+
+
+def strawberry_customer_options_from_records(records: list[Any]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    first_seen_order: list[str] = []
+    for record in records:
+        name = safe_customer_name(customer_name_from_record(record))
+        if not name:
+            continue
+        if name not in counts:
+            first_seen_order.append(name)
+        counts[name] = counts.get(name, 0) + 1
+    return [
+        {
+            "customer_id": local_customer_id(customer_name),
+            "customer_name": customer_name,
+            "label": customer_name,
+            "source_label": "草莓客户系统",
+            "source_count": counts[customer_name],
+            "source": STRAWBERRY_CUSTOMER_SOURCE,
+        }
+        for customer_name in sorted(first_seen_order)
+    ]
+
+
+def customer_name_from_record(record: Any) -> str:
+    if isinstance(record, dict):
+        return clean_text(record.get("name") or record.get("customer_name"))
+    return clean_text(getattr(record, "name", record))
+
+
+def merge_customer_options(
+    local_options: list[dict[str, Any]],
+    strawberry_options: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_name: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for option in [*local_options, *strawberry_options]:
+        name = safe_customer_name(option.get("customer_name"))
+        if not name:
+            continue
+        if name not in by_name:
+            by_name[name] = {
+                "customer_id": local_customer_id(name),
+                "customer_name": name,
+                "label": name,
+                "source_label": clean_text(option.get("source_label")),
+                "source_count": int(option.get("source_count") or 1),
+                "sources": [clean_text(option.get("source")) or LOCAL_CUSTOMER_SOURCE],
+            }
+            order.append(name)
+            continue
+        existing = by_name[name]
+        source = clean_text(option.get("source")) or LOCAL_CUSTOMER_SOURCE
+        if source not in existing["sources"]:
+            existing["sources"].append(source)
+        existing["source_count"] = int(existing.get("source_count") or 0) + int(
+            option.get("source_count") or 1
+        )
+        labels = [
+            label
+            for label in [
+                clean_text(existing.get("source_label")),
+                clean_text(option.get("source_label")),
+            ]
+            if label
+        ]
+        existing["source_label"] = " / ".join(dict.fromkeys(labels))
+    return [by_name[name] for name in sorted(order)]
+
+
+def resolve_customer_selection(
+    payload: dict[str, Any], customer_options: list[dict[str, Any]]
+) -> dict[str, str]:
+    customer_name = safe_customer_name(payload.get("customer_name"))
+    customer_id = clean_text(payload.get("customer_id"))
+    if customer_name:
+        return {"customer_name": customer_name, "customer_id": local_customer_id(customer_name)}
+    if customer_id:
+        for option in customer_options:
+            if clean_text(option.get("customer_id")) == customer_id:
+                return {
+                    "customer_name": safe_customer_name(option.get("customer_name")),
+                    "customer_id": customer_id,
+                }
+    return {"customer_name": "", "customer_id": ""}
+
+
+def customer_suggestion_payload(
+    group_name: Any,
+    config: AppConfig | None = None,
+    customer_names: list[Any] | None = None,
+) -> dict[str, Any]:
+    if customer_names is not None:
+        options = [
+            {
+                "customer_id": local_customer_id(name),
+                "customer_name": safe_customer_name(name),
+                "label": safe_customer_name(name),
+                "source_label": "已保存群客户",
+                "source_count": 1,
+            }
+            for name in customer_names
+            if safe_customer_name(name)
+        ]
+    else:
+        options = customer_options_payload(config)
+    return customer_suggestion_from_options(group_name, options)
+
+
+def customer_suggestion_from_options(
+    group_name: Any, customer_options: list[dict[str, Any]]
+) -> dict[str, Any]:
+    safe_group_name = safe_customer_name(group_name)
+    base = {
+        "suggested_customer_name": "",
+        "suggested_customer_id": "",
+        "match_status": "needs_manual_selection",
+        "reason_code": "no_reliable_match",
+        "customer_options_count": len(customer_options),
+    }
+    if not safe_group_name:
+        base["reason_code"] = "empty_group_name"
+        return base
+    if not customer_options:
+        base["reason_code"] = "no_customer_options"
+        return base
+
+    exact_matches: list[dict[str, Any]] = []
+    substring_matches: list[dict[str, Any]] = []
+    normalized_matches: list[dict[str, Any]] = []
+    normalized_group = normalize_customer_match_text(safe_group_name)
+    group_variants = customer_group_match_variants(safe_group_name)
+    weak_suggestion: dict[str, Any] | None = None
+    weak_score = 0.0
+    for option in customer_options:
+        customer_name = safe_customer_name(option.get("customer_name"))
+        if not customer_name:
+            continue
+        normalized_customer = normalize_customer_match_text(customer_name)
+        customer_variants = customer_name_match_variants(customer_name)
+        if safe_group_name == customer_name or normalized_group == normalized_customer:
+            exact_matches.append(option)
+        elif len(customer_name) >= 2 and customer_name in safe_group_name:
+            substring_matches.append(option)
+        elif (
+            len(normalized_customer) >= 2
+            and normalized_customer
+            and normalized_customer in normalized_group
+        ):
+            normalized_matches.append(option)
+        elif customer_match_variants_overlap(group_variants, customer_variants):
+            normalized_matches.append(option)
+        else:
+            score = customer_match_confidence(group_variants, customer_variants)
+            if score > weak_score:
+                weak_score = score
+                weak_suggestion = option
+
+    for reason, matches in [
+        ("exact_match", exact_matches),
+        ("substring_match", substring_matches),
+        ("normalized_match", normalized_matches),
+    ]:
+        unique_matches = unique_customer_options(matches)
+        if len(unique_matches) == 1:
+            option = unique_matches[0]
+            return {
+                "suggested_customer_name": safe_customer_name(option.get("customer_name")),
+                "suggested_customer_id": clean_text(option.get("customer_id")),
+                "match_status": "matched",
+                "reason_code": reason,
+                "customer_options_count": len(customer_options),
+            }
+        if len(unique_matches) > 1:
+            base["reason_code"] = "multiple_matches"
+            return base
+    if weak_suggestion and weak_score >= 0.45:
+        base["suggested_customer_name"] = safe_customer_name(
+            weak_suggestion.get("customer_name")
+        )
+        base["suggested_customer_id"] = clean_text(weak_suggestion.get("customer_id"))
+        base["reason_code"] = "low_confidence_suggestion"
+    return base
+
+
+def unique_customer_options(options: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for option in options:
+        customer_id = clean_text(option.get("customer_id"))
+        customer_name = safe_customer_name(option.get("customer_name"))
+        key = customer_id or customer_name
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(option)
+    return result
+
+
+def normalize_customer_match_text(value: Any) -> str:
+    return "".join(ch.lower() for ch in clean_text(value) if ch.isalnum())
+
+
+CUSTOMER_GROUP_NOISE_TERMS = [
+    "客户群",
+    "项目群",
+    "售后群",
+    "对接群",
+    "交流群",
+    "试读群",
+    "监控群",
+    "微信群",
+    "工作群",
+    "小红书",
+    "抖音",
+    "天猫",
+    "淘宝",
+    "京东",
+    "拼多多",
+    "视频号",
+    "快手",
+    "企微",
+    "微信",
+    "渠道",
+    "平台",
+    "群",
+]
+CUSTOMER_CONNECTOR_CHARS = ["x", "×", "&", "＋", "+", "和", "与"]
+
+
+def customer_group_match_variants(value: Any) -> set[str]:
+    variants = customer_name_match_variants(value)
+    for variant in list(variants):
+        without_noise = variant
+        for term in CUSTOMER_GROUP_NOISE_TERMS:
+            normalized_term = normalize_customer_match_text(term)
+            if normalized_term:
+                without_noise = without_noise.replace(normalized_term, "")
+        if without_noise:
+            variants.add(without_noise)
+            variants.add(remove_customer_connectors(without_noise))
+    return {variant for variant in variants if variant}
+
+
+def customer_name_match_variants(value: Any) -> set[str]:
+    base = normalize_customer_match_text(value)
+    variants = {base, remove_customer_connectors(base)}
+    return {variant for variant in variants if variant}
+
+
+def remove_customer_connectors(value: str) -> str:
+    result = clean_text(value)
+    for connector in CUSTOMER_CONNECTOR_CHARS:
+        result = result.replace(connector, "")
+    return result
+
+
+def customer_match_variants_overlap(
+    group_variants: set[str], customer_variants: set[str]
+) -> bool:
+    for customer_variant in customer_variants:
+        if len(customer_variant) < 2:
+            continue
+        for group_variant in group_variants:
+            if (
+                customer_variant == group_variant
+                or customer_variant in group_variant
+                or group_variant in customer_variant
+                and len(group_variant) >= max(2, len(customer_variant) - 1)
+            ):
+                return True
+    return False
+
+
+def customer_match_confidence(
+    group_variants: set[str], customer_variants: set[str]
+) -> float:
+    best = 0.0
+    for customer_variant in customer_variants:
+        if len(customer_variant) < 2:
+            continue
+        for group_variant in group_variants:
+            common = longest_common_substring_length(group_variant, customer_variant)
+            denominator = max(1, len(customer_variant))
+            best = max(best, common / denominator)
+    return best
+
+
+def longest_common_substring_length(left: str, right: str) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    best = 0
+    for left_char in left:
+        current = [0]
+        for index, right_char in enumerate(right, start=1):
+            length = previous[index - 1] + 1 if left_char == right_char else 0
+            current.append(length)
+            best = max(best, length)
+        previous = current
+    return best
+
+
 def safe_verification_status(value: Any) -> str:
     status = clean_text(value)
     return status if status in {"pending_verification", "verified"} else "pending_verification"
@@ -2200,11 +3747,23 @@ def monitor_group_verification_label(status: str) -> str:
     return "已验证" if status == "verified" else "待验证"
 
 
+def monitor_group_status_label(session: SessionConfig) -> str:
+    if bool(getattr(session, "archived", False)):
+        return "已归档"
+    if not session.enabled:
+        return "已停用"
+    if safe_verification_status(session.verification_status) != "verified":
+        return "待验证"
+    return "监控中"
+
+
 def monitor_group_counts_in_daily_center(session: SessionConfig) -> bool:
     return bool(
-        session.enabled
+        not bool(getattr(session, "archived", False))
+        and session.enabled
         and session.daily_monitor_enabled
         and session.include_in_daily
+        and safe_verification_status(session.verification_status) == "verified"
     )
 
 
@@ -2215,10 +3774,12 @@ def daily_center_monitor_group_count(config: AppConfig) -> int:
 
 
 def monitor_group_configuration_label(session: SessionConfig) -> str:
+    if bool(getattr(session, "archived", False)):
+        return "已归档"
     missing = []
     if not clean_text(session.customer_name or session.channel_name):
         missing.append("客户")
-    if not clean_text(session.owner_name):
+    if not clean_text(primary_owner_name(session)):
         missing.append("负责人")
     if not clean_text(session.module_name):
         missing.append("业务模块")
@@ -2231,11 +3792,830 @@ def monitor_group_configuration_label(session: SessionConfig) -> str:
     return "待补：" + "、".join(missing)
 
 
-def config_center_payload(config: AppConfig) -> dict[str, Any]:
+def internal_people_payload(
+    config: AppConfig, conn: sqlite3.Connection | None = None
+) -> dict[str, Any]:
+    people = [internal_person_public_payload(person, config, conn) for person in config.internal_people]
+    return {
+        "status": "ok",
+        "title": "我方人员",
+        "count": len(people),
+        "people": people,
+        "field_contract": {
+            "required": ["person_name"],
+            "optional": ["wechat_display_name", "aliases", "role", "modules", "enabled", "notes"],
+            "aliases_separator_label": "支持逗号、空格、换行分割",
+        },
+        "suggestion_sources": internal_people_source_summary(config, conn),
+        "safety": internal_people_safety_payload(config),
+    }
+
+
+def internal_person_public_payload(
+    person: PersonConfig,
+    config: AppConfig,
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    aliases = normalized_person_aliases(person)
+    return {
+        "person_id": person_public_id(person),
+        "person_name": redact_visible_text(person.person_name),
+        "name": redact_visible_text(person.person_name),
+        "wechat_display_name": redact_visible_text(person.wechat_display_name),
+        "common_names": aliases,
+        "aliases": aliases,
+        "role": clean_text(person.role) or "我方人员",
+        "modules": [redact_visible_text(module) for module in person.modules],
+        "enabled": bool(person.enabled),
+        "enabled_label": "启用" if person.enabled else "停用",
+        "notes": redact_visible_text(getattr(person, "notes", "")),
+        "initial_identity": "我方人员",
+        "confidence": "已匹配" if aliases else "可能是",
+        "requires_display_name": False,
+        "impact": internal_person_impact_payload(config, conn, person),
+    }
+
+
+def internal_people_suggestions_payload(
+    config: AppConfig, conn: sqlite3.Connection | None, payload: dict[str, Any]
+) -> dict[str, Any]:
+    query = clean_text(
+        payload.get("display_name")
+        or payload.get("name")
+        or payload.get("wechat_display_name")
+        or payload.get("query")
+    )
+    raw_wechat_id = clean_text(payload.get("wechat_id"))
+    requires_display_name = bool(raw_wechat_id and not query)
+    if requires_display_name:
+        return {
+            "status": "requires_display_name",
+            "requires_display_name": True,
+            "query_label": "",
+            "count": 0,
+            "suggestions": [],
+            "message": "只拿到内部标识，缺少可显示微信名；请补充微信显示名后再保存。",
+            "source_summary": internal_people_source_summary(config, conn),
+            "safety": internal_people_safety_payload(config),
+        }
+    safe_query = safe_member_display_name(query)
+    if not safe_query:
+        return {
+            "status": "empty",
+            "requires_display_name": False,
+            "query_label": "",
+            "count": 0,
+            "suggestions": [],
+            "message": "请输入人员姓名或微信显示名。",
+            "source_summary": internal_people_source_summary(config, conn),
+            "safety": internal_people_safety_payload(config),
+        }
+    suggestions = build_internal_person_suggestions(config, conn, safe_query)
+    return {
+        "status": "ok",
+        "requires_display_name": False,
+        "query_label": redact_visible_text(safe_query),
+        "count": len(suggestions),
+        "suggestions": suggestions,
+        "source_summary": internal_people_source_summary(config, conn),
+        "safety": internal_people_safety_payload(config),
+    }
+
+
+def save_internal_person_payload(
+    config: AppConfig,
+    conn: sqlite3.Connection | None,
+    payload: dict[str, Any],
+    person_id: str | None = None,
+) -> dict[str, Any]:
+    raw_wechat_id = clean_text(payload.get("wechat_id"))
+    display_name = safe_member_display_name(
+        payload.get("wechat_display_name") or payload.get("display_name")
+    )
+    person_name = safe_member_display_name(
+        payload.get("person_name") or payload.get("name")
+    )
+    if raw_wechat_id and not (display_name or person_name):
+        return {
+            "status": "blocked",
+            "error_code": "display_name_required",
+            "requires_display_name": True,
+            "message": "只拿到内部标识，缺少可显示微信名；不能保存成用户看不懂的内部 ID。",
+            "safety": internal_people_safety_payload(config),
+        }
+    if not person_name:
+        person_name = display_name
+    if not person_name:
+        return {
+            "status": "blocked",
+            "error_code": "person_name_required",
+            "requires_display_name": True,
+            "message": "请填写人员姓名或微信显示名。",
+            "safety": internal_people_safety_payload(config),
+        }
+    existing = find_person_by_id(config, person_id) if person_id else None
+    if person_id and existing is None:
+        return {"status": "not_found", "person": {}}
+    person = existing or find_person_by_name(config, person_name)
+    if person is None:
+        person = PersonConfig(person_name=person_name)
+        config.internal_people.append(person)
+    person.person_name = person_name
+    person.wechat_display_name = display_name
+    person.aliases = normalized_alias_input(
+        payload.get("aliases"),
+        extras=[person_name, display_name, payload.get("common_names")],
+    )
+    person.role = clean_text(payload.get("role")) or clean_text(person.role) or "我方人员"
+    person.modules = clean_text_list(payload.get("modules"))
+    person.enabled = parse_bool(payload.get("enabled"), True)
+    person.notes = redact_visible_text(clean_text(payload.get("notes")))
+    config.wx_cli.real_read_enabled = False
+    if conn is not None:
+        upsert_internal_person_aliases(conn, person)
+    write_config_center_yaml(config)
+    return {
+        "status": "saved",
+        "person": internal_person_public_payload(person, config, conn),
+        "downstream_status": internal_people_downstream_status(config, conn),
+        "real_read_enabled": False,
+        "save_triggers_collection": False,
+        "safety": internal_people_safety_payload(config),
+    }
+
+
+def disable_internal_person_payload(
+    config: AppConfig, conn: sqlite3.Connection | None, person_id: str
+) -> dict[str, Any]:
+    person = find_person_by_id(config, person_id)
+    if person is None:
+        return {"status": "not_found", "person": {}}
+    person.enabled = False
+    config.wx_cli.real_read_enabled = False
+    if conn is not None:
+        for alias in normalized_person_aliases(person):
+            conn.execute(
+                "update people_aliases set enabled = 0 where role = 'internal' and alias = ?",
+                (alias,),
+            )
+        conn.commit()
+    write_config_center_yaml(config)
+    return {
+        "status": "disabled",
+        "person": internal_person_public_payload(person, config, conn),
+        "real_read_enabled": False,
+        "save_triggers_collection": False,
+        "safety": internal_people_safety_payload(config),
+    }
+
+
+def build_internal_person_suggestions(
+    config: AppConfig, conn: sqlite3.Connection | None, query: str
+) -> list[dict[str, Any]]:
+    sources = internal_people_candidate_sources(config, conn)
+    query_lower = query.lower()
+    scored: list[dict[str, Any]] = []
+    for candidate in sources:
+        display = str(candidate["display_name"])
+        aliases = set(candidate.get("aliases", []))
+        matched = display == query or query in aliases
+        fuzzy = query_lower in display.lower() or any(
+            query_lower in str(alias).lower() for alias in aliases
+        )
+        if not (matched or fuzzy):
+            continue
+        confidence = "已匹配" if candidate["source"] == "people_library" and matched else "可能是"
+        scored.append(internal_person_suggestion_item(config, conn, candidate, confidence))
+    if not scored:
+        scored.append(
+            {
+                "person_name": redact_visible_text(query),
+                "wechat_display_name": redact_visible_text(query),
+                "common_names": [redact_visible_text(query)],
+                "aliases": [redact_visible_text(query)],
+                "role": "我方人员",
+                "modules": [],
+                "recent_appearance": recent_appearance_payload(conn, query),
+                "initial_identity": "待人工确认",
+                "confidence": "未找到",
+                "requires_display_name": False,
+                "impact": internal_people_downstream_status(config, conn),
+                "source_label": "可新建为我方人员",
+            }
+        )
+    return scored[:5]
+
+
+def internal_person_suggestion_item(
+    config: AppConfig,
+    conn: sqlite3.Connection | None,
+    candidate: dict[str, Any],
+    confidence: str,
+) -> dict[str, Any]:
+    display = str(candidate["display_name"])
+    aliases = unique_safe_member_names(list(candidate.get("aliases", [])) + [display])
+    return {
+        "person_name": redact_visible_text(candidate.get("person_name") or display),
+        "wechat_display_name": redact_visible_text(display),
+        "common_names": aliases,
+        "aliases": aliases,
+        "role": "我方人员",
+        "modules": [redact_visible_text(module) for module in candidate.get("modules", [])],
+        "recent_appearance": recent_appearance_payload(conn, display),
+        "initial_identity": "我方人员" if confidence == "已匹配" else "待人工确认",
+        "confidence": confidence,
+        "requires_display_name": False,
+        "impact": internal_people_downstream_status(config, conn),
+        "source_label": candidate.get("source_label", "本地可见来源"),
+    }
+
+
+def internal_people_candidate_sources(
+    config: AppConfig, conn: sqlite3.Connection | None
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for person in config.internal_people:
+        if not person.enabled:
+            continue
+        aliases = normalized_person_aliases(person)
+        display = safe_member_display_name(person.wechat_display_name or person.person_name)
+        if display:
+            candidates.append(
+                {
+                    "display_name": display,
+                    "person_name": person.person_name,
+                    "aliases": aliases,
+                    "modules": person.modules,
+                    "source": "people_library",
+                    "source_label": "已有我方人员库",
+                }
+            )
+    for name in all_local_sender_display_names(config, conn):
+        candidates.append(
+            {
+                "display_name": name,
+                "person_name": name,
+                "aliases": [name],
+                "modules": [],
+                "source": "local_senders",
+                "source_label": "本地最近发送人",
+            }
+        )
+    for session in config.sessions:
+        options = monitor_group_member_options(conn, session, config)
+        for name in options.get("names", []):
+            candidates.append(
+                {
+                    "display_name": name,
+                    "person_name": name,
+                    "aliases": [name],
+                    "modules": [session.module_name] if session.module_name else [],
+                    "source": "monitor_group_members",
+                    "source_label": "监控群成员池",
+                }
+            )
+    unique: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        display = safe_member_display_name(candidate.get("display_name"))
+        if not display:
+            continue
+        row = unique.setdefault(display, {**candidate, "aliases": [], "modules": []})
+        row["aliases"] = unique_safe_member_names(
+            list(row.get("aliases", [])) + list(candidate.get("aliases", []))
+        )
+        row["modules"] = unique_clean_text(
+            list(row.get("modules", [])) + list(candidate.get("modules", []))
+        )
+    return list(unique.values())
+
+
+def all_local_sender_display_names(
+    config: AppConfig, conn: sqlite3.Connection | None
+) -> list[str]:
+    names: list[str] = []
+    if conn is not None:
+        try:
+            rows = conn.execute(
+                """
+                select distinct sender_display_name
+                from raw_messages
+                order by sender_display_name
+                """
+            ).fetchall()
+            names.extend(str(row["sender_display_name"] or "") for row in rows)
+        except sqlite3.Error:
+            pass
+    for session in config.sessions:
+        names.extend(latest_trial_member_names(config, session))
+    return unique_safe_member_names(names)
+
+
+def recent_appearance_payload(
+    conn: sqlite3.Connection | None, display_name: str
+) -> dict[str, Any]:
+    if conn is None:
+        return {"message_count": 0, "group_count": 0, "groups": []}
+    try:
+        rows = conn.execute(
+            """
+            select s.external_id, s.display_name, count(rm.id) as message_count
+            from raw_messages rm
+            join sessions s on s.id = rm.session_id
+            where rm.sender_display_name = ?
+            group by s.external_id, s.display_name
+            order by message_count desc, s.display_name
+            """,
+            (display_name,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {"message_count": 0, "group_count": 0, "groups": []}
+    groups = [
+        {
+            "group_id": f"mg-{hashlib.sha256(str(row['external_id']).encode('utf-8')).hexdigest()[:12]}",
+            "group_name": redact_visible_text(row["display_name"]),
+            "message_count": int(row["message_count"] or 0),
+        }
+        for row in rows
+    ]
+    return {
+        "message_count": sum(group["message_count"] for group in groups),
+        "group_count": len(groups),
+        "groups": groups,
+    }
+
+
+def internal_person_impact_payload(
+    config: AppConfig, conn: sqlite3.Connection | None, person: PersonConfig
+) -> dict[str, Any]:
+    aliases = set(normalized_person_aliases(person))
+    group_count = len(
+        [
+            session
+            for session in config.sessions
+            if aliases.intersection(
+                set(normalized_owner_names(session))
+                | set(session.common_contacts)
+                | set(session.internal_people)
+                | set(getattr(session, "roster_member_names", []) or [])
+            )
+        ]
+    )
+    sender_count = 0
+    if conn is not None and aliases:
+        placeholders = ",".join("?" for _ in aliases)
+        try:
+            sender_count = int(
+                conn.execute(
+                    f"select count(*) from raw_messages where sender_display_name in ({placeholders})",
+                    tuple(aliases),
+                ).fetchone()[0]
+                or 0
+            )
+        except sqlite3.Error:
+            sender_count = 0
+    return {
+        "sender_message_count": sender_count,
+        "monitor_group_count": group_count,
+        "candidate_status": "身份映射可用于候选显示",
+        "daily_status": "日报会使用更新后的身份映射",
+        "transfer_status": "转述摘要会使用更新后的身份映射",
+    }
+
+
+def internal_people_downstream_status(
+    config: AppConfig, conn: sqlite3.Connection | None
+) -> dict[str, Any]:
+    enabled_people = [person for person in config.internal_people if person.enabled]
+    aliases = [alias for person in enabled_people for alias in normalized_person_aliases(person)]
+    sender_match_count = 0
+    if conn is not None and aliases:
+        placeholders = ",".join("?" for _ in aliases)
+        try:
+            sender_match_count = int(
+                conn.execute(
+                    f"select count(*) from raw_messages where sender_display_name in ({placeholders})",
+                    tuple(aliases),
+                ).fetchone()[0]
+                or 0
+            )
+        except sqlite3.Error:
+            sender_match_count = 0
+    return {
+        "people_count": len(enabled_people),
+        "alias_count": len(set(aliases)),
+        "sender_match_count": sender_match_count,
+        "group_option_count": len(
+            {
+                name
+                for session in config.sessions
+                for name in (
+                    normalized_owner_names(session)
+                    + session.common_contacts
+                    + session.internal_people
+                    + list(getattr(session, "roster_member_names", []) or [])
+                )
+            }
+        ),
+        "candidate_status": "已接入发送人识别",
+        "daily_status": "日报读取同一身份库",
+        "transfer_status": "转述摘要读取同一身份库",
+    }
+
+
+def internal_people_source_summary(
+    config: AppConfig, conn: sqlite3.Connection | None
+) -> dict[str, int]:
+    return {
+        "people_library_count": len([person for person in config.internal_people if person.enabled]),
+        "local_sender_count": len(all_local_sender_display_names(config, conn)),
+        "monitor_group_count": len(config.sessions),
+        "roster_member_count": len(
+            {
+                name
+                for session in config.sessions
+                for name in unique_safe_member_names(
+                    list(getattr(session, "roster_member_names", []) or [])
+                )
+            }
+        ),
+    }
+
+
+def internal_people_safety_payload(config: AppConfig) -> dict[str, Any]:
+    return {
+        "save_triggers_collection": False,
+        "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+        "raw_identifier_returned": False,
+        "formal_write_enabled": False,
+    }
+
+
+def normalized_person_aliases(person: PersonConfig) -> list[str]:
+    return unique_safe_member_names(
+        [person.person_name, person.wechat_display_name, *list(person.aliases or [])]
+    )
+
+
+def normalized_alias_input(value: Any, extras: list[Any] | None = None) -> list[str]:
+    values: list[Any] = []
+    if isinstance(value, list):
+        values.extend(value)
+    elif isinstance(value, str):
+        text = value.replace("，", ",").replace("\r", "\n").replace(",", "\n")
+        for line in text.splitlines():
+            values.extend(part for part in line.split(" ") if part)
+    for extra in extras or []:
+        if isinstance(extra, list):
+            values.extend(extra)
+        else:
+            values.append(extra)
+    return unique_safe_member_names(values)
+
+
+def find_person_by_id(config: AppConfig, person_id: str | None) -> PersonConfig | None:
+    if not person_id:
+        return None
+    return next((person for person in config.internal_people if person_public_id(person) == person_id), None)
+
+
+def find_person_by_name(config: AppConfig, person_name: str) -> PersonConfig | None:
+    return next(
+        (
+            person
+            for person in config.internal_people
+            if clean_text(person.person_name) == clean_text(person_name)
+        ),
+        None,
+    )
+
+
+def person_public_id(person: PersonConfig) -> str:
+    seed = clean_text(person.person_name) or clean_text(person.wechat_display_name)
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+    return f"person-{digest}"
+
+
+def upsert_internal_person_aliases(conn: sqlite3.Connection, person: PersonConfig) -> None:
+    for alias in normalized_person_aliases(person):
+        conn.execute(
+            """
+            insert into people_aliases (person_name, alias, role, enabled)
+            values (?, ?, 'internal', ?)
+            on conflict(alias, role) do update set
+              person_name = excluded.person_name,
+              enabled = excluded.enabled
+            """,
+            (person.person_name, alias, 1 if person.enabled else 0),
+        )
+    conn.commit()
+
+
+def messages_v1_payload(
+    config: AppConfig, conn: sqlite3.Connection, group_id: str = "all"
+) -> dict[str, Any]:
+    groups = message_group_options(config, conn)
+    selected = group_id if group_id and group_id != "all" else "all"
+    session_external = ""
+    if selected != "all":
+        session = find_monitor_group(config, selected)
+        if session is None:
+            return {"status": "not_found", "groups": groups, "messages": [], "count": 0}
+        session_external = session.external_id
+    query = """
+        select rm.id, rm.sender_display_name, rm.sender_role, rm.sent_at,
+               s.external_id, s.display_name, s.customer_name, s.module_name,
+               count(cim.item_id) as candidate_count
+        from raw_messages rm
+        join sessions s on s.id = rm.session_id
+        left join candidate_item_messages cim on cim.raw_message_id = rm.id
+    """
+    params: tuple[Any, ...] = ()
+    if session_external:
+        query += " where s.external_id = ?"
+        params = (session_external,)
+    query += """
+        group by rm.id, rm.sender_display_name, rm.sender_role, rm.sent_at,
+                 s.external_id, s.display_name, s.customer_name, s.module_name
+        order by rm.sent_at desc, rm.id desc
+        limit 100
+    """
+    try:
+        rows = conn.execute(query, params).fetchall()
+    except sqlite3.Error:
+        rows = []
+    messages = []
+    for row in rows:
+        row_group_id = f"mg-{hashlib.sha256(str(row['external_id']).encode('utf-8')).hexdigest()[:12]}"
+        ref = f"m-{int(row['id']):04d}"
+        messages.append(
+            {
+                "message_ref": ref,
+                "sent_at": str(row["sent_at"] or ""),
+                "group_id": row_group_id,
+                "group_name": redact_visible_text(row["display_name"]),
+                "customer_label": redact_visible_text(row["customer_name"] or "未标客户"),
+                "module_label": redact_visible_text(row["module_name"] or "未标模块"),
+                "sender_display_name": safe_sender_display(row["sender_display_name"]),
+                "sender_identity": safe_sender_role(row["sender_role"]),
+                "sender_identity_label": identity_label(row["sender_role"]),
+                "candidate_count": int(row["candidate_count"] or 0),
+                "detail_target": {"group_id": row_group_id, "message_ref": ref},
+            }
+        )
+    return {
+        "status": "ok",
+        "selected_group_id": selected,
+        "group_filter_label": "全部监控群" if selected == "all" else "单群消息",
+        "count": len(messages),
+        "groups": groups,
+        "messages": messages,
+        "safety": {
+            "content_returned": False,
+            "raw_payload_returned": False,
+            "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+        },
+    }
+
+
+def message_group_options(
+    config: AppConfig, conn: sqlite3.Connection
+) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    try:
+        rows = conn.execute(
+            """
+            select s.external_id, count(rm.id) as message_count
+            from sessions s
+            left join raw_messages rm on rm.session_id = s.id
+            group by s.external_id
+            """
+        ).fetchall()
+        counts = {str(row["external_id"]): int(row["message_count"] or 0) for row in rows}
+    except sqlite3.Error:
+        counts = {}
+    groups = [
+        {
+            "group_id": "all",
+            "group_name": "全部监控群",
+            "message_count": sum(counts.values()),
+            "enabled": True,
+        }
+    ]
+    for session in config.sessions:
+        groups.append(
+            {
+                "group_id": monitor_group_public_id(session),
+                "group_name": redact_visible_text(session.display_name),
+                "customer_label": redact_visible_text(session.customer_name or "未标客户"),
+                "enabled": bool(session.enabled),
+                "message_count": counts.get(session.external_id, 0),
+            }
+        )
+    return groups
+
+
+def identity_label(role: Any) -> str:
+    return {
+        "internal": "我方人员",
+        "customer": "客户侧",
+        "channel": "渠道侧",
+        "unknown": "待确认",
+    }.get(safe_sender_role(role), "待确认")
+
+
+def windows_readiness_payload(config: AppConfig) -> dict[str, Any]:
+    sample = Path(config.root) / "config" / "app.windows.example.yaml"
+    readiness = wx_cli_readiness(config)
+    mac_dev_detected = any(
+        token in json.dumps(
+            {
+                "allowed_session": config.wx_cli.real_allowed_session,
+                "sessions": [session.display_name for session in config.sessions],
+                "wx_binary": config.wx_cli.binary,
+                "database": config.database.path,
+                "export": config.export.directory,
+            },
+            ensure_ascii=False,
+        )
+        for token in ["襄城县", "/Users/gd", "Mac"]
+    )
+    path_isolation = windows_path_isolation_payload(config, sample)
+    wx_cli_summary = windows_wx_cli_summary_payload(config, readiness)
+    isolation_ok = (
+        sample.exists()
+        and not mac_dev_detected
+        and not config.wx_cli.real_read_enabled
+        and path_isolation["status"] == "ok"
+    )
+    return {
+        "status": "ok",
+        "title": "Windows 可实战配置底座",
+        "profile": "windows_formal",
+        "runtime_environment": windows_runtime_environment_label(),
+        "config_root": {
+            "label": "项目根目录",
+            "path_returned": False,
+            "status": "hidden_for_safety",
+        },
+        "config_sample": "config/app.windows.example.yaml",
+        "config_sample_exists": sample.exists(),
+        "mac_development_config_detected": mac_dev_detected,
+        "config_isolation_status": "ok" if isolation_ok else "needs_review",
+        "mac_import_policy_label": "Windows 导入群默认待验证，未验证前不计入日报监控",
+        "real_read_enabled": bool(config.wx_cli.real_read_enabled),
+        "wx_cli": wx_cli_summary,
+        "wechat_connection": {
+            "status": wx_cli_summary["connection_status"],
+            "label": wx_cli_summary["connection_label"],
+            "session_count_returned": False,
+            "message_read_executed": False,
+        },
+        "path_isolation": path_isolation,
+        "ready_label": (
+            "配置样例已就绪，默认不读取"
+            if isolation_ok
+            else "请先检查 Windows 配置隔离与真实读取开关"
+        ),
+        "checks": [
+            {
+                "key": "config_isolation",
+                "label": "Windows 正式挂机配置与 Mac 开发配置分离",
+                "passed": sample.exists() and not mac_dev_detected,
+            },
+            {
+                "key": "no_mac_test_account",
+                "label": "不混用 Mac 测试微信号配置",
+                "passed": not mac_dev_detected,
+            },
+            {
+                "key": "real_read_default_off",
+                "label": "真实读取默认关闭",
+                "passed": not config.wx_cli.real_read_enabled,
+            },
+            {
+                "key": "path_isolation",
+                "label": "数据 / 导出 / 日志 / 配置路径使用本项目隔离目录",
+                "passed": path_isolation["status"] == "ok",
+            },
+        ],
+        "safety": {
+            "no_real_read_executed": True,
+            "no_roster_sync_executed": True,
+            "path_details_returned": False,
+            "formal_write_enabled": False,
+            "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+        },
+    }
+
+
+def windows_runtime_environment_label() -> str:
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform == "darwin":
+        return "mac_development"
+    return "local_development"
+
+
+def windows_wx_cli_summary_payload(
+    config: AppConfig, readiness: dict[str, str]
+) -> dict[str, Any]:
+    mode = clean_text(config.wx_cli.mode) or "fixture"
+    readiness_status = clean_text(readiness.get("status")) or "unknown"
+    if mode == "fixture":
+        fixture_path = resolve_safe_relative_config_path(config.wx_cli.fixture_dir)
+        connection_status = "fixture_ready"
+        connection_label = "fixture 模式只检查本地样例，不连接微信。"
+    elif readiness_status == "ok":
+        fixture_path = ""
+        connection_status = "needs_connection_test"
+        connection_label = "wx-cli 可执行；微信登录状态需在 Windows 本机连接测试确认。"
+    else:
+        fixture_path = ""
+        connection_status = readiness_status
+        connection_label = "wx-cli 暂不可用；未执行连接测试。"
+    return {
+        "mode": mode,
+        "readiness_status": readiness_status,
+        "binary_configured": readiness.get("binary_configured") == "true",
+        "is_executable": readiness.get("is_executable") == "true",
+        "connection_status": connection_status,
+        "connection_label": connection_label,
+        "fixture_location_label": fixture_path,
+        "binary_path_returned": False,
+        "message_read_executed": False,
+    }
+
+
+def windows_path_isolation_payload(config: AppConfig, sample: Path) -> dict[str, Any]:
+    entries = [
+        windows_path_entry("database", config.database.path, "data"),
+        windows_path_entry("export", config.export.directory, "exports"),
+        {
+            "key": "logs",
+            "label": "日志目录",
+            "location_label": "logs",
+            "relative": True,
+            "mac_path_detected": False,
+            "status": "ok",
+        },
+        {
+            "key": "config_sample",
+            "label": "Windows 配置样例",
+            "location_label": "config/app.windows.example.yaml",
+            "relative": True,
+            "mac_path_detected": False,
+            "status": "ok" if sample.exists() else "missing",
+        },
+    ]
+    status = "ok" if all(entry["status"] == "ok" for entry in entries) else "needs_review"
+    return {
+        "status": status,
+        "path_details_returned": False,
+        "items": entries,
+    }
+
+
+def windows_path_entry(key: str, value: Any, expected_prefix: str) -> dict[str, Any]:
+    raw = clean_text(value)
+    path = Path(raw) if raw else Path()
+    is_relative = bool(raw) and not path.is_absolute()
+    mac_path_detected = "/Users/gd" in raw or raw.lower().startswith("/users/")
+    starts_expected = raw == expected_prefix or raw.startswith(f"{expected_prefix}/")
+    status = "ok" if is_relative and not mac_path_detected and starts_expected else "needs_review"
+    return {
+        "key": key,
+        "label": {"database": "数据目录", "export": "导出目录"}.get(key, key),
+        "location_label": resolve_safe_relative_config_path(raw),
+        "relative": is_relative,
+        "mac_path_detected": mac_path_detected,
+        "status": status,
+    }
+
+
+def resolve_safe_relative_config_path(value: Any) -> str:
+    raw = clean_text(value)
+    if not raw:
+        return ""
+    windows_drive_absolute = len(raw) > 2 and raw[1] == ":" and raw[2] in {"/", "\\"}
+    if (
+        "/Users/" in raw
+        or "\\Users\\" in raw
+        or Path(raw).is_absolute()
+        or windows_drive_absolute
+    ):
+        return "[路径已脱敏]"
+    return raw
+
+
+def config_center_payload(
+    config: AppConfig, conn: sqlite3.Connection | None = None
+) -> dict[str, Any]:
     enabled_whitelist_count = len(
         [s for s in config.sessions if s.enabled and s.is_whitelisted]
     )
     readiness = wx_cli_readiness(config)
+    customer_data = customer_options_with_source_payload(config)
+    customer_options = customer_data["options"]
     return {
         "status": {
             "mode": config.wx_cli.mode,
@@ -2246,33 +4626,23 @@ def config_center_payload(config: AppConfig) -> dict[str, Any]:
         },
         "editable": {
             "sessions": [
-                {
-                    "external_id": session.external_id,
-                    "display_name": session.display_name,
-                    "customer_name": session.customer_name,
-                    "channel_name": session.channel_name,
-                    "module_name": session.module_name,
-                    "owner_name": session.owner_name,
-                    "customer_stage": session.customer_stage,
-                    "group_type": session.group_type,
-                    "common_contacts": list(session.common_contacts),
-                    "reply_notes": session.reply_notes,
-                    "is_whitelisted": bool(session.is_whitelisted),
-                    "enabled": bool(session.enabled),
-                    "verification_status": safe_verification_status(
-                        session.verification_status
-                    ),
-                    "daily_monitor_enabled": bool(session.daily_monitor_enabled),
-                    "include_in_daily": bool(session.include_in_daily),
-                    "trial_scope": session.trial_scope,
-                    "internal_people": list(session.internal_people),
-                }
+                config_center_session_payload(session, conn, config)
                 for session in config.sessions
             ],
+            "customer_options": customer_options,
+            "customer_options_count": len(customer_options),
+            "customer_source_status": customer_data["source_status"],
+            "customer_source_error_code": customer_data["source_error_code"],
+            "customer_option_sources": customer_data["sources"],
             "internal_people": [
                 {
                     "person_name": person.person_name,
+                    "wechat_display_name": person.wechat_display_name,
                     "aliases": list(person.aliases),
+                    "role": person.role,
+                    "modules": list(person.modules),
+                    "enabled": bool(person.enabled),
+                    "notes": getattr(person, "notes", ""),
                 }
                 for person in config.internal_people
             ],
@@ -2287,6 +4657,11 @@ def config_center_payload(config: AppConfig) -> dict[str, Any]:
                 "end_at": config.wx_cli.real_end_at,
             },
         },
+        "customer_options": customer_options,
+        "customer_options_count": len(customer_options),
+        "customer_source_status": customer_data["source_status"],
+        "customer_source_error_code": customer_data["source_error_code"],
+        "customer_option_sources": customer_data["sources"],
         "safety": {
             "default_real_read_enabled": False,
             "save_triggers_collection": False,
@@ -2300,7 +4675,49 @@ def config_center_payload(config: AppConfig) -> dict[str, Any]:
     }
 
 
-def save_config_center_payload(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+def config_center_session_payload(
+    session: SessionConfig,
+    conn: sqlite3.Connection | None = None,
+    config: AppConfig | None = None,
+) -> dict[str, Any]:
+    member_options = monitor_group_member_options(conn, session, config)
+    return {
+        "external_id": session.external_id,
+        "display_name": session.display_name,
+        "customer_name": session.customer_name,
+        "channel_name": session.channel_name,
+        "module_name": session.module_name,
+        "owner_name": primary_owner_name(session),
+        "owner_names": normalized_owner_names(session),
+        "customer_stage": session.customer_stage,
+        "group_type": session.group_type,
+        "common_contacts": list(session.common_contacts),
+        "reply_notes": session.reply_notes,
+        "is_whitelisted": bool(session.is_whitelisted),
+        "enabled": bool(session.enabled),
+        "verification_status": safe_verification_status(session.verification_status),
+        "daily_monitor_enabled": bool(session.daily_monitor_enabled),
+        "include_in_daily": bool(session.include_in_daily),
+        "trial_scope": session.trial_scope,
+        "internal_people": list(session.internal_people),
+        "roster_member_names": list(getattr(session, "roster_member_names", []) or []),
+        "archived": bool(getattr(session, "archived", False)),
+        "customer_id": local_customer_id(session.customer_name),
+        "customer_options": customer_options_payload(config) if config else [],
+        "customer_options_count": len(customer_options_payload(config)) if config else 0,
+        "customer_suggestion": customer_suggestion_payload(
+            session.display_name, config
+        ),
+        "member_options": member_options,
+        "member_name_options": member_options["names"],
+    }
+
+
+def save_config_center_payload(
+    config: AppConfig,
+    payload: dict[str, Any],
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
     sessions_payload = payload.get("sessions")
     if isinstance(sessions_payload, list):
         config.sessions = [
@@ -2310,7 +4727,10 @@ def save_config_center_payload(config: AppConfig, payload: dict[str, Any]) -> di
                 customer_name=clean_text(item.get("customer_name")),
                 channel_name=clean_text(item.get("channel_name")),
                 module_name=clean_text(item.get("module_name")),
-                owner_name=clean_text(item.get("owner_name")),
+                owner_name=primary_owner_from_payload(item),
+                owner_names=clean_text_list(
+                    item.get("owner_names", item.get("owner_name"))
+                ),
                 customer_stage=clean_text(item.get("customer_stage")),
                 group_type=clean_text(item.get("group_type")),
                 common_contacts=clean_text_list(item.get("common_contacts")),
@@ -2326,6 +4746,8 @@ def save_config_center_payload(config: AppConfig, payload: dict[str, Any]) -> di
                 include_in_daily=parse_bool(item.get("include_in_daily"), True),
                 trial_scope=clean_text(item.get("trial_scope")) or "最近50条",
                 internal_people=clean_text_list(item.get("internal_people")),
+                roster_member_names=clean_text_list(item.get("roster_member_names")),
+                archived=parse_bool(item.get("archived"), False),
             )
             for item in sessions_payload
             if isinstance(item, dict)
@@ -2338,15 +4760,21 @@ def save_config_center_payload(config: AppConfig, payload: dict[str, Any]) -> di
         config.internal_people = [
             PersonConfig(
                 person_name=clean_text(item.get("person_name")),
-                aliases=[
-                    clean_text(alias)
-                    for alias in item.get("aliases", [])
-                    if clean_text(alias)
-                ],
+                wechat_display_name=safe_member_display_name(
+                    item.get("wechat_display_name") or item.get("display_name")
+                ),
+                aliases=normalized_alias_input(item.get("aliases")),
+                role=clean_text(item.get("role")) or "我方人员",
+                modules=clean_text_list(item.get("modules")),
+                enabled=parse_bool(item.get("enabled"), True),
+                notes=redact_visible_text(clean_text(item.get("notes"))),
             )
             for item in people_payload
             if isinstance(item, dict) and clean_text(item.get("person_name"))
         ]
+        if conn is not None:
+            for person in config.internal_people:
+                upsert_internal_person_aliases(conn, person)
 
     risk_payload = payload.get("risk", {})
     if isinstance(risk_payload, dict):
@@ -2372,7 +4800,7 @@ def save_config_center_payload(config: AppConfig, payload: dict[str, Any]) -> di
         "status": "saved",
         "real_read_enabled": False,
         "saved_to": "config/app.yaml",
-        "editable": config_center_payload(config)["editable"],
+        "editable": config_center_payload(config, conn)["editable"],
     }
 
 
@@ -2472,7 +4900,8 @@ def write_config_center_yaml(config: AppConfig) -> None:
                 "customer_name": session.customer_name,
                 "channel_name": session.channel_name,
                 "module_name": session.module_name,
-                "owner_name": session.owner_name,
+                "owner_name": primary_owner_name(session),
+                "owner_names": normalized_owner_names(session),
                 "customer_stage": session.customer_stage,
                 "group_type": session.group_type,
                 "common_contacts": list(session.common_contacts),
@@ -2486,11 +4915,23 @@ def write_config_center_yaml(config: AppConfig) -> None:
                 "include_in_daily": bool(session.include_in_daily),
                 "trial_scope": session.trial_scope,
                 "internal_people": list(session.internal_people),
+                "roster_member_names": list(
+                    getattr(session, "roster_member_names", []) or []
+                ),
+                "archived": bool(getattr(session, "archived", False)),
             }
             for session in config.sessions
         ],
         "internal_people": [
-            {"person_name": person.person_name, "aliases": list(person.aliases)}
+            {
+                "person_name": person.person_name,
+                "wechat_display_name": person.wechat_display_name,
+                "aliases": list(person.aliases),
+                "role": person.role,
+                "modules": list(person.modules),
+                "enabled": bool(person.enabled),
+                "notes": getattr(person, "notes", ""),
+            }
             for person in config.internal_people
         ],
         "risk": {
@@ -2513,9 +4954,18 @@ def clean_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
+def now_local_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def primary_owner_from_payload(item: dict[str, Any]) -> str:
+    owner_names = clean_text_list(item.get("owner_names", item.get("owner_name")))
+    return owner_names[0] if owner_names else ""
+
+
 def clean_text_list(value: Any) -> list[str]:
     if isinstance(value, str):
-        values = value.replace("\r", "\n").split("\n")
+        values = value.replace("，", ",").replace("\r", "\n").replace(",", "\n").split("\n")
     elif isinstance(value, list):
         values = value
     else:

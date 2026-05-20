@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>微信反馈日报中心</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260519-daily-center-p0" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260520-archive-delete-feedback" />
   </head>
   <body>
     <header class="topbar">
@@ -53,6 +53,42 @@
               <button id="exportDailyMarkdownBtn">导出 Markdown</button>
             </div>
           </header>
+
+          <section class="environment-banner" id="environmentStatusBanner">
+            当前运行环境识别中；Windows 正式挂机与 Mac 开发测试配置必须分开。
+          </section>
+
+          <section class="windows-readiness-panel" id="windowsReadinessPanel" aria-live="polite">
+            <div class="windows-readiness-head">
+              <div>
+                <p class="eyebrow">Windows 可实战状态</p>
+                <h3>本机工作台检查</h3>
+              </div>
+              <p id="windowsReadinessLine">正在读取运行环境、配置隔离和日报生成状态。</p>
+            </div>
+            <div class="windows-readiness-grid" id="windowsReadinessCards">
+              <article class="windows-readiness-card"><span>运行环境</span><b>识别中</b><small>区分 Windows 正式挂机 / Mac 开发测试</small></article>
+              <article class="windows-readiness-card"><span>配置隔离</span><b>待确认</b><small>本机微信配置不会与 Mac 测试配置混用</small></article>
+              <article class="windows-readiness-card"><span>微信连接</span><b>待确认</b><small>刷新状态后显示本机连接状态</small></article>
+              <article class="windows-readiness-card"><span>监控群</span><b>待加载</b><small>新增群默认待验证</small></article>
+              <article class="windows-readiness-card"><span>我方人员</span><b>待加载</b><small>读取后端身份库</small></article>
+              <article class="windows-readiness-card"><span>日报生成</span><b>待生成</b><small>点击后会立即显示进度</small></article>
+            </div>
+          </section>
+
+          <section class="daily-focus-panel" id="dailyFocusPanel">
+            <div>
+              <p class="eyebrow">今天最要跟进</p>
+              <h3 id="todayPriorityTitle">载入中...</h3>
+              <p id="todayPriorityLine">正在汇总候选、监控群缺口和日报状态。</p>
+            </div>
+            <div class="daily-focus-actions">
+              <button data-jump-page="messages" type="button">按群看消息</button>
+              <button data-jump-page="candidates" type="button">处理候选</button>
+              <button data-jump-page="group-management" type="button">配置监控群</button>
+              <button data-jump-page="people" type="button">配置我方人员</button>
+            </div>
+          </section>
 
           <div class="daily-center-cards" id="dailyCenterCards">
             <article class="daily-center-card"><span>日报状态</span><b>载入中</b><small>正在读取本机草稿</small></article>
@@ -137,12 +173,16 @@
             <header class="column-head">
               <div>
                 <h2>消息明细</h2>
-                <p>最近 50 条原始消息，本地审阅谁在什么时间说了什么。</p>
+                <p>先选监控群，再看该群消息；全部群只用于排查。</p>
               </div>
               <button id="refreshRealTrialMessagesBtn">刷新</button>
             </header>
+            <div class="message-group-filter">
+              <label>监控群<select id="messageGroupFilter"></select></label>
+              <p id="messageGroupFilterStatus" class="safe-note">正在加载群视图...</p>
+            </div>
             <div id="realTrialMessages" class="message-list"></div>
-            <p class="safe-note">真实原文只在本机 UI 展示，不写状态卡、日志或外发材料。</p>
+            <p class="safe-note">本页使用按群消息摘要接口；不返回消息正文或原始 payload。</p>
           </section>
 
           <section class="inbox-column candidate-column" id="candidateInboxPanel" data-page="candidates">
@@ -276,7 +316,7 @@
           <header class="panel-head group-management-head">
             <div>
               <h2>群管理</h2>
-              <p class="safe-note">这里维护监控群档案和群 / 客户打标；新增、编辑和停用只影响本机配置，不会自动读取或外发。</p>
+              <p class="safe-note">这里维护监控群档案和群 / 客户打标；新增、编辑、停用、归档和删除只影响本项目本地配置，不会自动读取或外发。</p>
             </div>
             <button id="addMonitorGroupBtn">新增监控群</button>
           </header>
@@ -295,13 +335,34 @@
               </div>
               <div class="group-form-grid">
                 <label class="wide">监控群名称<input id="monitorGroupDisplayName" /></label>
-                <label>客户名称<select id="monitorGroupCustomer"></select></label>
+                <label>客户名称<select id="monitorGroupCustomer"></select><small id="monitorGroupCustomerSourceStatus" class="field-hint customer-source-status">客户来源：待加载</small><small id="monitorGroupCustomerHint" class="field-hint">填写监控群名称后，会尝试识别客户。</small><button id="acceptCustomerSuggestionBtn" type="button" class="suggestion-adopt-btn hidden">采用建议客户</button></label>
                 <label>群类型<select id="monitorGroupType"></select></label>
                 <label>业务模块<select id="monitorGroupModule"></select></label>
                 <label>客户阶段<select id="monitorGroupStage"></select></label>
-                <label>群负责人<select id="monitorGroupOwner"></select></label>
-                <label>常用联系人<select id="monitorGroupContacts" multiple></select></label>
-                <label>我方人员<select id="monitorGroupInternalPeople" multiple></select></label>
+                <div class="member-picker wide" id="monitorGroupMemberPicker">
+                  <div class="member-picker-head">
+                    <label>成员名单<input id="monitorGroupMemberSearch" placeholder="搜索本地已出现成员" /></label>
+                    <div class="member-sync-panel">
+                      <div class="member-sync-actions">
+                        <p id="monitorGroupMemberNotice" class="safe-note">正在加载该群成员选项...</p>
+                        <div class="member-sync-buttons">
+                          <button id="refreshMonitorGroupMembersBtn" type="button">刷新本地已出现成员</button>
+                          <button id="syncMonitorGroupRosterBtn" type="button" class="primary-action">同步微信群全员名单</button>
+                        </div>
+                      </div>
+                      <p id="monitorGroupMemberSyncStatus" class="safe-note">当前展示：本地已出现成员；不是群全员名单。</p>
+                      <label class="toggle roster-create-option" id="monitorGroupSyncRosterOnCreateWrap">
+                        <input type="checkbox" id="monitorGroupSyncRosterOnCreate" checked />
+                        <span>
+                          保存后同步微信群全员名单
+                          <small id="monitorGroupSyncRosterOnCreateHint">只读取成员名单元数据，不读取聊天消息，不外发，不写正式区。</small>
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+                  <div id="monitorGroupMemberChips" class="selected-chip-list" aria-live="polite"></div>
+                  <div id="monitorGroupMemberPool" class="member-role-list" aria-live="polite"></div>
+                </div>
                 <label>试读范围<select id="monitorGroupTrialRange"></select></label>
                 <label class="toggle"><input type="checkbox" id="monitorGroupDailyMonitor" /> 是否每日监控</label>
                 <label class="toggle"><input type="checkbox" id="monitorGroupIncludeDaily" /> 是否纳入日报</label>
@@ -311,6 +372,8 @@
               <div class="form-actions">
                 <button id="saveMonitorGroupBtn">保存群档案</button>
                 <button id="disableMonitorGroupBtn" type="button">停用监控</button>
+                <button id="archiveMonitorGroupBtn" type="button">归档</button>
+                <button id="deleteMonitorGroupBtn" type="button" class="danger-action">删除</button>
                 <button id="trialMonitorGroupBtn" type="button" disabled>试读本群</button>
               </div>
               <p id="monitorGroupSaveResult" class="safe-note"></p>
@@ -321,14 +384,45 @@
         <section class="workspace-page people-page" id="peoplePage" data-page="people">
           <header class="panel-head">
             <div>
-              <h2>我方人员</h2>
-              <p class="safe-note">用于群负责人和发送人识别，只保存本机配置。</p>
+              <h2>我方人员身份库</h2>
+              <p class="safe-note">先识别，再确认保存；用于发送人识别、群负责人和日报归属。</p>
             </div>
-            <button id="addPeoplePagePersonBtn">新增人员</button>
+            <button id="addPeoplePagePersonBtn">新建空白身份</button>
           </header>
-          <div id="peoplePageRows" class="editor-list"></div>
+          <section class="people-guide">
+            <div class="people-guide-entry">
+              <label>输入微信号<input id="peopleLookupWxid" placeholder="粘贴微信号后识别；不会显示原始 ID" /></label>
+              <button id="peopleMatchByWxidBtn" type="button">识别微信号</button>
+            </div>
+            <div class="people-guide-entry">
+              <label>输入微信显示名<input id="peopleLookupDisplayName" placeholder="例如群里显示的名字" /></label>
+              <button id="peopleMatchByNameBtn" type="button">识别显示名</button>
+            </div>
+            <div class="people-guide-entry">
+              <label>从最近发送人选择<select id="peopleRecentSenderSelect"></select></label>
+              <button id="peopleUseRecentSenderBtn" type="button">带入发送人</button>
+            </div>
+          </section>
+          <div id="peopleApiStatus" class="people-api-status safe-note">正在连接我方人员接口...</div>
+          <section id="peopleMatchResult" class="people-match-result" aria-live="polite"></section>
+          <section class="people-fixed-form">
+            <label>人员姓名<input id="peoplePersonNameInput" placeholder="保存为我方人员姓名" /></label>
+            <label>微信显示名<input id="peopleWechatDisplayInput" placeholder="群里看到的显示名" /></label>
+            <label>常见昵称<input id="peopleNicknameInput" placeholder="常被怎么称呼" /></label>
+            <label>角色<select id="peopleRoleSelect"></select></label>
+            <label>负责模块<select id="peopleModulesSelect" multiple></select></label>
+            <label class="toggle"><input type="checkbox" id="peopleEnabledCheckbox" checked /> 启用识别</label>
+            <label class="wide">别名一键粘贴<input id="peopleAliasPasteInput" placeholder="粘贴多个别名，逗号 / 空格 / 换行都会拆成标签" /></label>
+            <div class="wide people-alias-tools">
+              <button id="peopleAddAliasBtn" type="button">拆成别名标签</button>
+              <div id="peopleAliasChips" class="selected-chip-list" aria-live="polite"></div>
+            </div>
+            <label class="wide">备注<textarea id="peopleNotesInput" rows="3" placeholder="只写身份识别需要的备注"></textarea></label>
+          </section>
+          <div id="peopleImpactScope" class="impact-scope safe-note">保存后会影响：试读消息、发送人识别、候选事项、群负责人下拉、日报、转述摘要。</div>
+          <div id="peoplePageRows" class="people-list"></div>
           <div class="form-actions people-actions">
-            <button id="savePeoplePageBtn">保存人员</button>
+            <button id="savePeoplePageBtn">确认保存身份</button>
             <p id="peoplePageResult" class="safe-note"></p>
           </div>
         </section>
@@ -629,6 +723,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260519-daily-center-p0"></script>
+    <script src="/static/app.js?v=20260520-archive-delete-feedback"></script>
   </body>
 </html>
