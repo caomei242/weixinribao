@@ -65,6 +65,20 @@ CONFIGURABLE_REAL_TRIAL_PRESETS = {
     "multi_group_30d",
     "recent30days",
 }
+ALL_WECHAT_GROUP_SCOPE_ALIASES = {
+    "all_wechat_groups",
+    "all_wechat_group",
+    "allwechatgroups",
+    "allwechatgroup",
+    "all_detected_groups",
+    "all_detected_wechat_groups",
+    "alldetectedgroups",
+    "alldetectedwechatgroups",
+    "all_wechat_chatrooms",
+    "allwechatchatrooms",
+    "wechat_groups_all",
+    "wechatgroupsall",
+}
 
 
 def create_app(config: AppConfig):
@@ -5383,7 +5397,14 @@ def persistent_real_read_contract_payload(config: AppConfig) -> dict[str, Any]:
         "max_messages_per_group": caps["max_messages_per_group"],
         "batch_limit": caps["batch_limit"],
         "multi_group_supported": True,
-        "uses_enabled_whitelist_only": True,
+        "default_scope_mode": "enabled_whitelist",
+        "supported_scope_modes": ["enabled_whitelist", "all_wechat_groups"],
+        "uses_enabled_whitelist_only": False,
+        "all_wechat_groups_scope_supported": True,
+        "all_wechat_groups_source": "wx_cli_sessions_probe",
+        "all_wechat_groups_filters_non_group_sessions": True,
+        "all_wechat_groups_returns_group_list": False,
+        "all_wechat_groups_can_upsert_local_monitor_groups": True,
         "writes_local_raw_normalized_candidate": True,
         "formal_write_enabled": False,
         "no_external_send": True,
@@ -5431,6 +5452,13 @@ def normalized_real_trial_scope_mode(payload: dict[str, Any]) -> str:
     compact = normalized.replace("_", "")
     if normalized in CONFIGURABLE_REAL_TRIAL_PRESETS or compact in CONFIGURABLE_REAL_TRIAL_PRESETS:
         return "configurable_window"
+    if normalized in ALL_WECHAT_GROUP_SCOPE_ALIASES or compact in ALL_WECHAT_GROUP_SCOPE_ALIASES:
+        return "all_wechat_groups"
+    if parse_bool(payload.get("include_all_detected_groups"), False) or parse_bool(
+        payload.get("include_all_wechat_groups"),
+        False,
+    ):
+        return "all_wechat_groups"
     return "legacy_recent50"
 
 
@@ -5759,6 +5787,232 @@ def execute_configurable_real_trial_once(
     return summary
 
 
+def session_probe_payload_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        values = payload
+    elif isinstance(payload, dict):
+        values = []
+        for key in ("sessions", "items", "data", "chats", "rooms", "contacts"):
+            child = payload.get(key)
+            if isinstance(child, list):
+                values = child
+                break
+        if not values and any(key in payload for key in ("id", "name", "display_name")):
+            values = [payload]
+    else:
+        values = []
+    return [item for item in values if isinstance(item, dict)]
+
+
+def session_probe_text(item: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = clean_text(item.get(key))
+        if value:
+            return value
+    return ""
+
+
+def session_probe_type_text(item: dict[str, Any]) -> str:
+    return " ".join(
+        clean_text(item.get(key)).lower()
+        for key in (
+            "type",
+            "kind",
+            "category",
+            "chat_type",
+            "session_type",
+            "conversation_type",
+        )
+        if clean_text(item.get(key))
+    )
+
+
+def session_probe_type_tokens(item: dict[str, Any]) -> set[str]:
+    text = session_probe_type_text(item).replace("-", " ").replace("_", " ")
+    return {token for token in text.split() if token}
+
+
+def session_probe_has_text(item: dict[str, Any], *keys: str) -> bool:
+    return any(bool(clean_text(item.get(key))) for key in keys)
+
+
+def is_detected_wechat_group_session(item: dict[str, Any]) -> bool:
+    type_text = session_probe_type_text(item)
+    type_tokens = session_probe_type_tokens(item)
+    identifier = session_probe_text(
+        item,
+        "id",
+        "external_id",
+        "username",
+        "room_id",
+        "chat_id",
+        "conversation_id",
+        "session_id",
+    )
+    display = session_probe_text(item, "display_name", "name", "nickname", "remark")
+    identifier_text = identifier.lower()
+    display_text = display.lower()
+    haystack = f"{type_text} {identifier_text} {display_text}".lower()
+    if any(
+        token in haystack
+        for token in ("filehelper", "文件传输助手")
+    ):
+        return False
+    if any(
+        token in type_text
+        for token in (
+            "official",
+            "public",
+            "subscription",
+            "service_account",
+            "mp",
+            "single",
+            "friend",
+            "private",
+            "contact",
+            "system",
+        )
+    ):
+        return False
+    if any(
+        token in display_text
+        for token in (
+            "公众号",
+            "单聊",
+        )
+    ):
+        return False
+    for key in ("is_group", "is_group_chat", "group", "is_chatroom"):
+        if parse_bool(item.get(key), False):
+            return True
+    if "@chatroom" in identifier_text:
+        return True
+    if "chatroom" in type_tokens or type_text in {"chatroom", "wechat_chatroom"}:
+        return True
+    if "group" in type_tokens or type_text in {"group", "wechat_group", "group_chat"}:
+        return True
+    if session_probe_has_text(item, "room_id", "chatroom_id"):
+        return True
+    return any(token in display for token in ("微信群", "群聊"))
+
+
+def detected_group_identifier(item: dict[str, Any], index: int) -> str:
+    raw = session_probe_text(
+        item,
+        "id",
+        "external_id",
+        "username",
+        "room_id",
+        "chat_id",
+        "conversation_id",
+        "session_id",
+    ) or session_probe_text(item, "display_name", "name", "nickname", "remark")
+    digest = hashlib.sha256((raw or f"detected-{index}").encode("utf-8")).hexdigest()[:12]
+    return f"detected-wechat-group-{digest}"
+
+
+def detected_group_display_name(item: dict[str, Any], index: int) -> str:
+    return (
+        session_probe_text(item, "display_name", "name", "nickname", "remark")
+        or session_probe_text(
+            item,
+            "id",
+            "external_id",
+            "username",
+            "room_id",
+            "chat_id",
+            "conversation_id",
+            "session_id",
+        )
+        or f"微信群-{index + 1}"
+    )
+
+
+def detected_wechat_group_sessions(payload: Any) -> tuple[list[SessionConfig], dict[str, Any]]:
+    items = session_probe_payload_items(payload)
+    selected: list[SessionConfig] = []
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        if not is_detected_wechat_group_session(item):
+            continue
+        external_id = detected_group_identifier(item, index)
+        if external_id in seen:
+            continue
+        seen.add(external_id)
+        selected.append(
+            SessionConfig(
+                external_id=external_id,
+                display_name=detected_group_display_name(item, index),
+                group_type="微信群",
+                is_whitelisted=False,
+                enabled=True,
+                verification_status="pending_verification",
+                daily_monitor_enabled=False,
+                include_in_daily=False,
+                trial_scope="全部微信群首跑",
+            )
+        )
+    summary = {
+        "source_status": clean_text(payload.get("status")) if isinstance(payload, dict) else "ok",
+        "source_error_code": clean_text(payload.get("error_code")) if isinstance(payload, dict) else "",
+        "detected_session_count": len(items),
+        "detected_group_count": len(selected),
+        "excluded_non_group_count": max(0, len(items) - len(selected)),
+        "groups_returned": False,
+        "session_names_returned": False,
+    }
+    if not summary["source_status"]:
+        summary["source_status"] = "ok"
+    return selected, summary
+
+
+def probe_wechat_group_sessions(
+    config: AppConfig,
+    session_probe: Callable[[AppConfig], Any] | None = None,
+) -> tuple[list[SessionConfig], dict[str, Any]]:
+    if session_probe is not None:
+        payload = session_probe(config)
+    else:
+        result = run_wx_cli_json(config, ["sessions", "--json"])
+        if result.status != "ok":
+            return [], {
+                "source_status": "failed",
+                "source_error_code": clean_text(result.error_code) or result.status,
+                "detected_session_count": 0,
+                "detected_group_count": 0,
+                "excluded_non_group_count": 0,
+                "groups_returned": False,
+                "session_names_returned": False,
+            }
+        payload = result.parsed
+    if isinstance(payload, dict) and clean_text(payload.get("status")) not in {"", "ok", "success"}:
+        return [], {
+            "source_status": clean_text(payload.get("status")) or "failed",
+            "source_error_code": clean_text(payload.get("error_code")) or "session_probe_failed",
+            "detected_session_count": len(session_probe_payload_items(payload)),
+            "detected_group_count": 0,
+            "excluded_non_group_count": len(session_probe_payload_items(payload)),
+            "groups_returned": False,
+            "session_names_returned": False,
+        }
+    return detected_wechat_group_sessions(payload)
+
+
+def upsert_detected_monitor_groups(config: AppConfig, sessions: list[SessionConfig]) -> int:
+    by_id = {session.external_id: session for session in config.sessions}
+    by_name = {session.display_name: session for session in config.sessions}
+    inserted = 0
+    for detected in sessions:
+        existing = by_id.get(detected.external_id) or by_name.get(detected.display_name)
+        if existing is not None:
+            continue
+        config.sessions.append(detected)
+        inserted += 1
+    if inserted:
+        write_config_center_yaml(config)
+    return inserted
+
+
 def persistent_real_read_blocked(
     error_code: str,
     message: str,
@@ -5766,8 +6020,11 @@ def persistent_real_read_blocked(
     selected_group_count: int = 0,
     window_summary: dict[str, Any] | None = None,
     trigger: str = "manual",
+    scope_mode: str = "configurable_window",
+    scope_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     window_summary = window_summary or {}
+    scope_extra = scope_extra or {}
     return {
         "status": "blocked",
         "authorization_mode": "persistent",
@@ -5779,13 +6036,14 @@ def persistent_real_read_blocked(
         "reason_code": error_code,
         "message": message,
         "scope": {
-            "scope_mode": "configurable_window",
+            "scope_mode": scope_mode,
             "authorization_mode": "persistent",
             "trigger": trigger,
             "selected_group_count": selected_group_count,
             "groups_returned": False,
             "session_names_returned": False,
             **window_summary,
+            **scope_extra,
         },
         "limits": window_summary,
         "execution": {
@@ -5861,25 +6119,32 @@ def persistent_real_read_run_plan(
     payload: dict[str, Any],
     conn: sqlite3.Connection | None = None,
     executor: Callable[[dict[str, Any]], Any] | None = None,
+    session_probe: Callable[[AppConfig], Any] | None = None,
 ) -> dict[str, Any]:
     trigger = persistent_real_read_trigger(payload)
+    scope_mode = normalized_real_trial_scope_mode(payload)
+    if scope_mode not in {"configurable_window", "all_wechat_groups"}:
+        scope_mode = "configurable_window"
     if trigger not in {"manual", "scheduled"}:
         return persistent_real_read_blocked(
             "persistent_real_read_trigger_invalid",
             "长期真实读取触发方式只支持手动或定时。",
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     if not bool(getattr(config.wx_cli, "persistent_real_read_enabled", False)):
         return persistent_real_read_blocked(
             "persistent_real_read_disabled",
             "长期真实读取授权默认关闭；未执行真实读取。",
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     if bool(getattr(config.wx_cli, "persistent_real_read_paused", False)):
         return persistent_real_read_blocked(
             "persistent_real_read_paused",
             "长期真实读取已暂停；未执行真实读取。",
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     test_account_confirmed = bool(
         getattr(config.wx_cli, "persistent_real_read_test_account_confirmed", False)
@@ -5889,6 +6154,7 @@ def persistent_real_read_run_plan(
             "persistent_real_read_test_account_required",
             "长期真实读取需要确认 Windows 测试微信号；未执行真实读取。",
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     if trigger == "scheduled" and not bool(
         getattr(config.wx_cli, "persistent_real_read_schedule_enabled", False)
@@ -5897,6 +6163,7 @@ def persistent_real_read_run_plan(
             "persistent_real_read_schedule_disabled",
             "长期真实读取定时触发未开启；未执行真实读取。",
             trigger=trigger,
+            scope_mode=scope_mode,
         )
 
     caps = expanded_real_trial_caps(config)
@@ -5913,12 +6180,14 @@ def persistent_real_read_run_plan(
             "expanded_trial_time_range_invalid",
             "长期真实读取起止时间必须完整且结束时间晚于开始时间。",
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     if error_code or window_summary is None:
         return persistent_real_read_blocked(
             "expanded_trial_lookback_days_invalid",
             "长期真实读取天数必须是正整数。",
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     if window_summary["effective_lookback_days"] > caps["max_allowed_lookback_days"]:
         return persistent_real_read_blocked(
@@ -5926,6 +6195,7 @@ def persistent_real_read_run_plan(
             "长期真实读取范围超过当前配置上限。",
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
         )
 
     max_total_messages, error_code = parse_trial_int(
@@ -5939,6 +6209,7 @@ def persistent_real_read_run_plan(
             "长期真实读取总消息上限必须是正整数。",
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     if max_total_messages > caps["max_total_messages"]:
         return persistent_real_read_blocked(
@@ -5946,6 +6217,7 @@ def persistent_real_read_run_plan(
             "长期真实读取总消息上限超过安全配置。",
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
         )
 
     max_messages_per_group, error_code = parse_trial_int(
@@ -5959,6 +6231,7 @@ def persistent_real_read_run_plan(
             "长期真实读取单群消息上限必须是正整数。",
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     if max_messages_per_group > caps["max_messages_per_group"]:
         return persistent_real_read_blocked(
@@ -5966,6 +6239,7 @@ def persistent_real_read_run_plan(
             "长期真实读取单群消息上限超过安全配置。",
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
         )
 
     batch_limit, error_code = parse_trial_int(
@@ -5979,6 +6253,7 @@ def persistent_real_read_run_plan(
             "长期真实读取批次上限必须是正整数。",
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     if batch_limit > caps["batch_limit"]:
         return persistent_real_read_blocked(
@@ -5986,11 +6261,30 @@ def persistent_real_read_run_plan(
             "长期真实读取批次上限超过安全配置。",
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
         )
 
-    selected_sessions, requested_group_count, scope_valid = persistent_selected_sessions(
-        config, payload
-    )
+    scope_summary: dict[str, Any] = {}
+    local_groups_upserted = 0
+    if scope_mode == "all_wechat_groups":
+        selected_sessions, scope_summary = probe_wechat_group_sessions(config, session_probe)
+        if scope_summary.get("source_status") not in {"ok", "success"}:
+            return persistent_real_read_blocked(
+                "persistent_real_read_session_probe_failed",
+                "全部微信群范围需要先完成会话探针；未执行消息读取。",
+                selected_group_count=0,
+                window_summary=window_summary,
+                trigger=trigger,
+                scope_mode=scope_mode,
+                scope_extra=scope_summary,
+            )
+        local_groups_upserted = upsert_detected_monitor_groups(config, selected_sessions)
+        requested_group_count = int(scope_summary.get("detected_group_count") or 0)
+        scope_valid = True
+    else:
+        selected_sessions, requested_group_count, scope_valid = persistent_selected_sessions(
+            config, payload
+        )
     selected_group_count = len(selected_sessions)
     if not scope_valid:
         return persistent_real_read_blocked(
@@ -5999,13 +6293,16 @@ def persistent_real_read_run_plan(
             selected_group_count=selected_group_count,
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
         )
     if selected_group_count < 1:
         return persistent_real_read_blocked(
             "expanded_trial_no_groups_selected",
-            "没有可用于长期真实读取的启用白名单群。",
+            "没有可用于长期真实读取的微信群。",
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
+            scope_extra=scope_summary,
         )
     if selected_group_count > caps["max_groups"]:
         return persistent_real_read_blocked(
@@ -6014,6 +6311,8 @@ def persistent_real_read_run_plan(
             selected_group_count=selected_group_count,
             window_summary=window_summary,
             trigger=trigger,
+            scope_mode=scope_mode,
+            scope_extra=scope_summary,
         )
 
     limits_summary = {
@@ -6032,7 +6331,9 @@ def persistent_real_read_run_plan(
                 {
                     "authorization_mode": "persistent",
                     "trigger": trigger,
+                    "scope_mode": scope_mode,
                     "selected_group_count": selected_group_count,
+                    **scope_summary,
                     "window": dict(window_summary),
                     "limits": dict(limits_summary),
                     "real_read_enabled_before": bool(config.wx_cli.real_read_enabled),
@@ -6074,7 +6375,7 @@ def persistent_real_read_run_plan(
         "reason_code": execution_result["error_code"],
         "message": "长期真实读取已通过授权配置进入执行路径；响应仅返回数量和状态摘要。",
         "scope": {
-            "scope_mode": "configurable_window",
+            "scope_mode": scope_mode,
             "authorization_mode": "persistent",
             "trigger": trigger,
             "multi_group": True,
@@ -6082,6 +6383,7 @@ def persistent_real_read_run_plan(
             "enabled_whitelist_count": len(enabled_whitelist_sessions(config)),
             "requested_group_count": requested_group_count,
             "selected_group_count": selected_group_count,
+            "local_monitor_groups_upserted": local_groups_upserted,
             "test_wechat_account_confirmed": True,
             "groups_returned": False,
             "session_names_returned": False,
@@ -6089,6 +6391,7 @@ def persistent_real_read_run_plan(
             "no_auto_reply": True,
             "no_formal_write": True,
             **window_summary,
+            **scope_summary,
         },
         "limits": limits_summary,
         "execution": {
@@ -6457,14 +6760,22 @@ def real_trial_run_plan(
     payload: dict[str, Any],
     conn: sqlite3.Connection | None = None,
     executor: Callable[[dict[str, Any]], Any] | None = None,
+    session_probe: Callable[[AppConfig], Any] | None = None,
 ) -> dict[str, Any]:
-    if normalized_real_trial_scope_mode(payload) == "configurable_window":
+    scope_mode = normalized_real_trial_scope_mode(payload)
+    if scope_mode in {"configurable_window", "all_wechat_groups"}:
         if normalized_authorization_mode(payload) == "persistent":
             return persistent_real_read_run_plan(
                 config,
                 payload,
                 conn=conn,
                 executor=executor,
+                session_probe=session_probe,
+            )
+        if scope_mode == "all_wechat_groups":
+            return expanded_trial_blocked(
+                "all_wechat_groups_requires_persistent_authorization",
+                "全部微信群首跑范围只允许通过长期真实读取授权契约进入。",
             )
         return expanded_real_trial_run_plan(
             config,

@@ -67,6 +67,70 @@ def persistent_payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
+def all_wechat_groups_payload(**overrides: object) -> dict[str, object]:
+    return persistent_payload(
+        scope_mode="all_wechat_groups",
+        include_all_detected_groups=True,
+        **overrides,
+    )
+
+
+def detected_session_probe_payload() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "sessions": [
+            {
+                "id": "room-a@chatroom",
+                "name": "探针群一",
+                "type": "group",
+                "is_group": True,
+            },
+            {
+                "id": "room-b@chatroom",
+                "display_name": "探针群二",
+                "chat_type": "chatroom",
+            },
+            {
+                "id": "single-a",
+                "name": "单聊甲",
+                "type": "single",
+                "is_group": False,
+            },
+            {
+                "id": "official-a",
+                "name": "公众号甲",
+                "type": "official",
+            },
+            {
+                "id": "filehelper",
+                "name": "文件传输助手",
+                "type": "system",
+            },
+        ],
+    }
+
+
+def english_room_group_probe_payload() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "sessions": [
+            {
+                "id": "single-showroom",
+                "name": "Customer Showroom",
+            },
+            {
+                "id": "single-workgroup",
+                "display_name": "Marketing Group Updates",
+            },
+            {
+                "id": "english-team@chatroom",
+                "display_name": "Operations Group",
+                "chat_type": "chatroom",
+            },
+        ],
+    }
+
+
 def assert_no_sensitive_fields(testcase: unittest.TestCase, payload: dict) -> None:
     text = json.dumps(payload, ensure_ascii=False)
     for forbidden in (
@@ -78,8 +142,22 @@ def assert_no_sensitive_fields(testcase: unittest.TestCase, payload: dict) -> No
         "候选正文",
         "测试群A",
         "测试群B",
+        "探针群一",
+        "探针群二",
+        "单聊甲",
+        "公众号甲",
+        "Customer Showroom",
+        "Marketing Group Updates",
+        "Operations Group",
         "group-a",
         "group-b",
+        "room-a",
+        "room-b",
+        "single-showroom",
+        "single-workgroup",
+        "english-team",
+        "single-a",
+        "official-a",
         "member_name_options",
         "raw_payload",
         '"key":',
@@ -152,6 +230,121 @@ class PersistentRealReadContractTest(unittest.TestCase):
         self.assertFalse(config.wx_cli.real_read_enabled)
         assert_no_sensitive_fields(self, result)
 
+    def test_persistent_all_wechat_groups_scope_uses_probe_groups_and_fake_executor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = sample_config(Path(tmp), enabled=True)
+
+            def fake_executor(plan: dict) -> dict:
+                self.assertEqual(plan["scope_mode"], "all_wechat_groups")
+                self.assertEqual(plan["selected_group_count"], 2)
+                self.assertEqual(plan["detected_session_count"], 5)
+                self.assertEqual(plan["detected_group_count"], 2)
+                self.assertEqual(plan["excluded_non_group_count"], 3)
+                return {
+                    "status": "success",
+                    "sessions_total": plan["selected_group_count"],
+                    "sessions_success": plan["selected_group_count"],
+                    "raw_messages_seen": 8,
+                    "raw_messages_inserted": 6,
+                    "raw_messages_duplicated": 2,
+                    "candidate_items_created": 2,
+                }
+
+            result = real_trial_run_plan(
+                config,
+                all_wechat_groups_payload(),
+                executor=fake_executor,
+                session_probe=lambda _config: detected_session_probe_payload(),
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["scope"]["scope_mode"], "all_wechat_groups")
+            self.assertEqual(result["scope"]["selected_group_count"], 2)
+            self.assertEqual(result["scope"]["detected_session_count"], 5)
+            self.assertEqual(result["scope"]["detected_group_count"], 2)
+            self.assertEqual(result["scope"]["excluded_non_group_count"], 3)
+            self.assertGreaterEqual(result["scope"]["local_monitor_groups_upserted"], 0)
+            self.assertFalse(result["scope"]["groups_returned"])
+            self.assertFalse(result["scope"]["session_names_returned"])
+            self.assertFalse(config.wx_cli.real_read_enabled)
+            saved = (Path(tmp) / "config" / "app.yaml").read_text(encoding="utf-8")
+            self.assertIn("detected-wechat-group-", saved)
+            assert_no_sensitive_fields(self, result)
+
+    def test_persistent_all_wechat_groups_excludes_non_group_sessions(self):
+        config = sample_config(enabled=True)
+
+        result = real_trial_run_plan(
+            config,
+            all_wechat_groups_payload(),
+            executor=lambda plan: {
+                "status": "success",
+                "sessions_total": plan["selected_group_count"],
+                "sessions_success": plan["selected_group_count"],
+            },
+            session_probe=lambda _config: detected_session_probe_payload(),
+        )
+
+        self.assertEqual(result["scope"]["selected_group_count"], 2)
+        self.assertEqual(result["scope"]["excluded_non_group_count"], 3)
+        self.assertEqual(result["scope"]["source_status"], "ok")
+        assert_no_sensitive_fields(self, result)
+
+    def test_persistent_all_wechat_groups_does_not_match_english_room_group_names(self):
+        config = sample_config(enabled=True)
+
+        def fake_executor(plan: dict) -> dict:
+            self.assertEqual(plan["scope_mode"], "all_wechat_groups")
+            self.assertEqual(plan["detected_session_count"], 3)
+            self.assertEqual(plan["detected_group_count"], 1)
+            self.assertEqual(plan["excluded_non_group_count"], 2)
+            self.assertEqual(plan["selected_group_count"], 1)
+            return {
+                "status": "success",
+                "sessions_total": plan["selected_group_count"],
+                "sessions_success": plan["selected_group_count"],
+            }
+
+        result = real_trial_run_plan(
+            config,
+            all_wechat_groups_payload(),
+            executor=fake_executor,
+            session_probe=lambda _config: english_room_group_probe_payload(),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["scope"]["selected_group_count"], 1)
+        self.assertEqual(result["scope"]["detected_group_count"], 1)
+        self.assertEqual(result["scope"]["excluded_non_group_count"], 2)
+        assert_no_sensitive_fields(self, result)
+
+    def test_persistent_all_wechat_groups_probe_failure_blocks_before_history(self):
+        config = sample_config(enabled=True)
+        executor_called = False
+
+        def fake_executor(plan: dict) -> dict:
+            nonlocal executor_called
+            executor_called = True
+            return {"status": "success"}
+
+        result = real_trial_run_plan(
+            config,
+            all_wechat_groups_payload(),
+            executor=fake_executor,
+            session_probe=lambda _config: {
+                "status": "failed",
+                "error_code": "session_probe_unavailable",
+            },
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["error_code"], "persistent_real_read_session_probe_failed")
+        self.assertEqual(result["scope"]["scope_mode"], "all_wechat_groups")
+        self.assertEqual(result["scope"]["source_status"], "failed")
+        self.assertTrue(result["execution"]["no_real_read_executed"])
+        self.assertFalse(executor_called)
+        assert_no_sensitive_fields(self, result)
+
     def test_persistent_scheduled_trigger_requires_schedule_enabled(self):
         disabled = real_trial_run_plan(
             sample_config(enabled=True, schedule_enabled=False),
@@ -212,6 +405,31 @@ class PersistentRealReadContractTest(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["error_code"], "persistent_real_read_group_scope_invalid")
         self.assertFalse(result["will_run"])
+        assert_no_sensitive_fields(self, result)
+
+    def test_persistent_whitelist_scope_still_uses_enabled_whitelist_only(self):
+        config = sample_config(enabled=True)
+
+        def fake_executor(plan: dict) -> dict:
+            self.assertEqual(plan["scope_mode"], "configurable_window")
+            self.assertEqual(plan["selected_group_count"], 2)
+            self.assertNotIn("detected_group_count", plan)
+            return {
+                "status": "success",
+                "sessions_total": plan["selected_group_count"],
+                "sessions_success": plan["selected_group_count"],
+            }
+
+        result = real_trial_run_plan(
+            config,
+            persistent_payload(include_all_enabled_whitelist=True),
+            executor=fake_executor,
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["scope"]["scope_mode"], "configurable_window")
+        self.assertEqual(result["scope"]["enabled_whitelist_count"], 2)
+        self.assertEqual(result["scope"]["selected_group_count"], 2)
         assert_no_sensitive_fields(self, result)
 
     def test_status_and_config_center_expose_persistent_authorization_contract(self):

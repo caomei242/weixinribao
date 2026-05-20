@@ -1,6 +1,6 @@
 # 微信agent专项 后端/API 助手状态卡
 
-更新时间：2026-05-20 20:10 CST
+更新时间：2026-05-20 21:18 CST
 
 ## 线程身份
 
@@ -12,69 +12,65 @@
 
 ## 本轮任务
 
-- 任务标记：`监工返工：2026-05-20｜后端API｜config-center 字段白名单收紧`
-- 归属任务：`监工派工：2026-05-20｜后端API｜长期真实读取授权实战版`
+- 任务标记：`监工返工：2026-05-20｜后端API｜all_wechat_groups 非群英文误判修复`
+- 关联复核：`监工派工：2026-05-20｜测试审查｜persistent 首跑范围扩为全部微信群复核`
 - 状态：完成，待测试审查 / 监工验收
-- 结论：已收紧 `/api/config-center` full payload。`status.latest_trial` 改为 pathless 摘要，不再返回 `sqlite_path` / DB path；`editable.sessions[]` 的成员池改为 count/status 摘要，不再返回 `member_name_options`、`roster_member_names` 或 `member_options.names/items/appeared_members/roster_members/full_members`。
-- 回传状态：`send_input` 不在当前工具列表，无法直发监工线程；按规则追加监工回报队列。已发监工：send_input 不可用，已走回报队列。
+- 结论：已收紧 `all_wechat_groups` 微信群识别逻辑。英文 `room` / `group` 不再从 display/name/haystack 里做短 token 模糊命中；英文真实群必须依赖明确布尔字段、`@chatroom`、`chatroom` / `group` 类型字段或 `room_id/chatroom_id` 等结构化信号。
+- 回传状态：已尝试 `send_input` 直发监工线程，返回 `agent not found`；按规则追加监工回报队列。已发监工：直发失败，已走回报队列。
 
 ## 改动文件
 
 - `/Users/gd/Desktop/微信agent专项/src/wechat_feedback_app/routes.py`
 - `/Users/gd/Desktop/微信agent专项/tests/test_persistent_real_read_contract.py`
-- `/Users/gd/Desktop/微信agent专项/tests/test_daily_center_monitor_groups.py`
 - `/Users/gd/Desktop/微信agent专项/开发/状态卡/后端API助手.md`
 - `/Users/gd/Desktop/微信agent专项/开发/监工回报队列.md`
 
-说明：工作区仍包含前一棒长期授权实战版改动及其他线程历史脏改；本棒只做 config-center 白名单收紧与测试补证，未回滚其他线程内容。
+说明：工作区仍包含前序任务与其他线程历史脏改；本棒只做 all_wechat_groups 非群英文误判修复与测试补证，未回滚其他内容。
 
-## 字段白名单收紧
+## 识别规则修复
 
-- `status.latest_trial`：由完整 `latest_real_trial_payload` 改为 `latest_real_trial_config_center_summary`，仅保留 status/count/布尔和 read_shape 摘要。
-- 路径字段：不再返回 `sqlite_path`、`db_path`、`database_path`；`path_fields_returned=false`。
-- 成员字段：`editable.sessions[].member_options` 改为 `monitor_group_member_options_summary`，只含 scope/complete/status_label/source_label/count/available_count/appeared_count/roster_count/refresh_status/roster_status/full_sync 状态等摘要。
-- 移除名单级字段：`member_name_options`、`roster_member_names`、`member_options.names`、`items`、`appeared_members`、`roster_members`、`full_members`。
-- 详情页兼容：`/api/monitor-groups/{group_id}` 和刷新/同步接口仍可作为前台成员选择器的数据源；本棒只收紧 `config-center` full payload 安全验收面。
+- 保留强信号：
+  - `is_group`、`is_group_chat`、`group`、`is_chatroom` 等布尔字段为 true。
+  - 会话 id / room id 中包含 `@chatroom`。
+  - 类型字段明确为 `chatroom`、`group`、`wechat_group`、`group_chat`。
+  - 存在 `room_id` / `chatroom_id` 结构化字段。
+  - 中文 display/name 中出现“微信群 / 群聊”。
+- 移除误判来源：
+  - 不再用英文短 token `group` / `room` 扫完整 display/name/haystack。
+  - 非群英文名称即使包含 `room` / `group`，没有明确结构化群信号也不会入选。
+- 负向过滤仍保留：公众号、单聊、系统 / filehelper 等非群会话排除。
 
-## 保持不回退
+## 测试补证
 
-- 长期授权主契约不回退：`authorization_mode=persistent`、默认关闭、手动触发、定时触发、暂停 blocked、多白名单群、去重、本地 raw/normalized/candidate 链路仍由相关测试覆盖。
-- `/api/status` 与 `/api/real-trial/run` persistent 默认关闭路径未改。
-- `real_read_enabled=false` / `real_read_enabled_after=false` 口径保持。
+- 新增 fake/stub 测试：非群英文会话名含 `room` / `group` 不入选；英文真实群名只有带 `chatroom` 结构化信号才入选。
+- 保持原有通过项：`all_wechat_groups` / `include_all_detected_groups` 进入 fake executor、探针失败 blocked 不调用 executor、旧 `include_all_enabled_whitelist` 白名单模式不回退。
+- 字段白名单继续断言响应不返回探针名称、会话 id、真实正文、成员、客户、wxid、DB path、daemon 等敏感字段。
 
 ## 测试 / 证据
 
-- 红灯证据：`.codex_py_logs/py-run-20260520-200717.log`，full payload scan 命中 `status.latest_trial.sqlite_path` 与成员名单级字段。
-- 定向白名单测试：`.codex_py_logs/py-run-20260520-200831.log`，5 selected passed。
-- 相关后端专项：`.codex_py_logs/py-run-20260520-200841.log`，75 passed，覆盖长期授权、群成员、expanded、一性入口、真实读取旧路径、字段白名单、wx-cli 适配和去重。
-- 全量 pytest：`.codex_py_logs/py-run-20260520-200913.log`，132 passed。
+- 红灯证据：`.codex_py_logs/py-run-20260520-211711.log`，新增英文误判测试失败，`detected_group_count` 误为 3。
+- persistent 专项：`.codex_py_logs/py-run-20260520-211744.log`，16 passed。
+- 相关后端专项：`.codex_py_logs/py-run-20260520-211751.log`，93 passed。
+- 全量 pytest：`.codex_py_logs/py-run-20260520-211759.log`，137 passed。
 - `git diff --check`：exit=0。
-- 运行态 HTTP smoke：`.codex_runtime_logs/http-smoke-config-center-whitelist-20260520-201019.log`，node exit=0。
-
-## 运行态 Smoke 摘要
-
-- `/api/config-center`：HTTP 200。
-- `status.latest_trial` 存在且 `path_fields_returned=false`。
-- session count 仅记录数量；`first_session_member_list_returned=false`。
-- forbidden field hit count = 0。
-- `sqlite_path` 文本命中 false。
-- `member_name_options` 文本命中 false。
-- `raw_payload` 文本命中 false。
 
 ## 字段白名单 / 安全边界
 
+- 响应只返回 count/status/error_code、detected/excluded count、入库/候选/去重/失败摘要。
+- `groups_returned=false`、`session_names_returned=false` 保持。
 - 本轮未执行真实读取、未执行真实 roster 同步、未执行 `wx history/search/export/new-messages`。
+- 未自动外发 / 自动回复。
 - 未写正式日报、正式待办池、Obsidian 正式区或外部系统。
 - 未摘录真实消息正文、候选正文、草稿正文、真实群名、真实会话、真实成员、客户名单、wxid/key/salt、DB 路径、IP、daemon 原始日志或 Windows 敏感路径。
-- 状态卡、回报队列和 smoke 只记录 status/count/error_code/字段存在性/布尔值和日志路径。
+- `real_read_enabled=false` / `real_read_enabled_after=false` 保持。
 
 ## 剩余风险
 
-- 前台若此前依赖 `/api/config-center.editable.sessions[].member_name_options` 渲染成员下拉，需要改为调用 `/api/monitor-groups/{group_id}` 或 refresh/sync 成员接口获取详情页名单；本棒已在 config-center 提供 `member_options_detail_endpoint` 和摘要。
-- Windows 仍需拉取包含本棒字段白名单收紧的新代码后再复验。
+- 本轮只用 fake/stub 验证，没有在 Windows 执行真实会话探针或真实首读。
+- Windows wx-cli 实际 `sessions --json` 字段形态仍需发布后用 count/status smoke 验证；不得输出真实会话名。
+- all scope 会把检测到的群落成本地可管理监控群；过滤规则已收紧，但真实环境仍需观察 excluded count 是否合理。
 
 ## 下一棒建议
 
-- 派测试审查复核 `/api/config-center` full payload key-path 扫描，重点看 `sqlite_path`、DB path、`member_name_options`、成员名单级字段均为空命中。
-- 前台/UI 若需要修复下拉来源，使用 `/api/monitor-groups/{group_id}` 详情接口，不再从 config-center full payload 取名单。
-- 通过后再做发布收口与 Windows 拉取复验。
+- 派测试审查最小复验：重点看英文 `room/group` 非群误判已修复、英文真实群依赖结构化信号入选、旧白名单模式不回退、字段白名单不回退。
+- 复验通过后再进入发布收口 / Windows Git 发布目录拉取；当前仍不要执行 Windows persistent 首跑。
