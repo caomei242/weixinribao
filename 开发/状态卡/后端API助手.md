@@ -1,6 +1,6 @@
 # 微信agent专项 后端/API 助手状态卡
 
-更新时间：2026-05-20 21:18 CST
+更新时间：2026-05-20 22:41 CST
 
 ## 线程身份
 
@@ -12,65 +12,64 @@
 
 ## 本轮任务
 
-- 任务标记：`监工返工：2026-05-20｜后端API｜all_wechat_groups 非群英文误判修复`
-- 关联复核：`监工派工：2026-05-20｜测试审查｜persistent 首跑范围扩为全部微信群复核`
-- 状态：完成，待测试审查 / 监工验收
-- 结论：已收紧 `all_wechat_groups` 微信群识别逻辑。英文 `room` / `group` 不再从 display/name/haystack 里做短 token 模糊命中；英文真实群必须依赖明确布尔字段、`@chatroom`、`chatroom` / `group` 类型字段或 `room_id/chatroom_id` 等结构化信号。
-- 回传状态：已尝试 `send_input` 直发监工线程，返回 `agent not found`；按规则追加监工回报队列。已发监工：直发失败，已走回报队列。
+- 任务标记：`监工返工：2026-05-20｜后端API｜本地操作台主显示字段去误脱敏`
+- 状态：完成，待监工验收
+- 结论：后端 payload 已区分“本地操作台主显示字段”和“跨线程 / report-safe 脱敏字段”。群管理、消息明细、我方人员、候选 / 日报、最近试读候选的主显示字段保留本地 UI 可识别值；同 payload 增补或保留 `*_safe` / `redacted_*` 字段用于回报、smoke、测试审查等安全摘要。
 
 ## 改动文件
 
 - `/Users/gd/Desktop/微信agent专项/src/wechat_feedback_app/routes.py`
-- `/Users/gd/Desktop/微信agent专项/tests/test_persistent_real_read_contract.py`
+- `/Users/gd/Desktop/微信agent专项/src/wechat_feedback_app/exporter.py`
+- `/Users/gd/Desktop/微信agent专项/tests/test_local_ui_display_contract.py`
 - `/Users/gd/Desktop/微信agent专项/开发/状态卡/后端API助手.md`
 - `/Users/gd/Desktop/微信agent专项/开发/监工回报队列.md`
 
-说明：工作区仍包含前序任务与其他线程历史脏改；本棒只做 all_wechat_groups 非群英文误判修复与测试补证，未回滚其他内容。
+说明：未修改前台静态文件；工作区中 `AGENTS.md` 及其他总控/监工侧记录为既有未提交改动，本棒未回滚。
 
-## 识别规则修复
+## 关键实现
 
-- 保留强信号：
-  - `is_group`、`is_group_chat`、`group`、`is_chatroom` 等布尔字段为 true。
-  - 会话 id / room id 中包含 `@chatroom`。
-  - 类型字段明确为 `chatroom`、`group`、`wechat_group`、`group_chat`。
-  - 存在 `room_id` / `chatroom_id` 结构化字段。
-  - 中文 display/name 中出现“微信群 / 群聊”。
-- 移除误判来源：
-  - 不再用英文短 token `group` / `room` 扫完整 display/name/haystack。
-  - 非群英文名称即使包含 `room` / `group`，没有明确结构化群信号也不会入选。
-- 负向过滤仍保留：公众号、单聊、系统 / filehelper 等非群会话排除。
-
-## 测试补证
-
-- 新增 fake/stub 测试：非群英文会话名含 `room` / `group` 不入选；英文真实群名只有带 `chatroom` 结构化信号才入选。
-- 保持原有通过项：`all_wechat_groups` / `include_all_detected_groups` 进入 fake executor、探针失败 blocked 不调用 executor、旧 `include_all_enabled_whitelist` 白名单模式不回退。
-- 字段白名单继续断言响应不返回探针名称、会话 id、真实正文、成员、客户、wxid、DB path、daemon 等敏感字段。
+- 新增 `local_ui_display_text()` / `local_ui_display_list()`：保留本地 UI 普通可识别名称，不因通用脱敏规则误伤主字段；但仍拦截硬禁 token、路径、raw/content 标记和测试敏感标记。
+- 群管理 payload：`group_name`、`display_name`、`customer_name`、`group_type`、`module_name`、`customer_stage`、`owner_label`、detail 联系人/备注等改为本地 UI 主字段真值，同时提供 safe 副本。
+- 消息明细 payload：群标签、客户标签、模块标签主字段可读，同时提供 safe 副本；正文和 raw payload 仍不返回。
+- 我方人员 payload / suggestion：人员姓名、微信显示名、模块、notes、建议主字段可读，同时提供 safe 副本。
+- 候选 / 日报 / 最近试读：本地审阅字段与 report-safe 字段分层；日报全文、转述预览、smoke / 白名单旧安全合同继续使用脱敏摘要，不让硬禁标记进入跨线程可引用字段。
+- `redact_visible_text()` 增补测试敏感标记脱敏，确保旧 report-safe 合同不回退。
 
 ## 测试 / 证据
 
-- 红灯证据：`.codex_py_logs/py-run-20260520-211711.log`，新增英文误判测试失败，`detected_group_count` 误为 3。
-- persistent 专项：`.codex_py_logs/py-run-20260520-211744.log`，16 passed。
-- 相关后端专项：`.codex_py_logs/py-run-20260520-211751.log`，93 passed。
-- 全量 pytest：`.codex_py_logs/py-run-20260520-211759.log`，137 passed。
-- `git diff --check`：exit=0。
+- 新增专项：`python exit=0 log=.codex_py_logs/py-run-20260520-223701.log`，`tests/test_local_ui_display_contract.py` 5 passed。
+- 相关后端专项：`python exit=0 log=.codex_py_logs/py-run-20260520-224013.log`，96 passed。
+- 全量 pytest：`python exit=0 log=.codex_py_logs/py-run-20260520-224022.log`，142 passed。
+- `git diff --check`：通过。
 
-## 字段白名单 / 安全边界
+## 字段白名单
 
-- 响应只返回 count/status/error_code、detected/excluded count、入库/候选/去重/失败摘要。
-- `groups_returned=false`、`session_names_returned=false` 保持。
-- 本轮未执行真实读取、未执行真实 roster 同步、未执行 `wx history/search/export/new-messages`。
+- `/api/config-center` forbidden field hit count 不回退：专项测试覆盖 `sqlite_path` / DB path / `member_name_options` / raw payload 类禁字段。
+- 本地 UI 主字段允许本机操作所需可识别文本；状态卡、回报队列、测试日志和 smoke 仍只记录 count / status / 字段存在性 / 布尔结果。
+- 硬禁内容仍不得返回：真实消息正文、候选正文原文证据、真实会话列表、真实成员名单、客户名单、wxid/key/salt、DB path、IP、daemon 原始日志、raw payload。
+
+## 安全边界
+
+- 未新增真实读取。
+- 未执行真实 roster 同步。
+- 未手工执行 `wx history/search/export/new-messages`。
 - 未自动外发 / 自动回复。
 - 未写正式日报、正式待办池、Obsidian 正式区或外部系统。
-- 未摘录真实消息正文、候选正文、草稿正文、真实群名、真实会话、真实成员、客户名单、wxid/key/salt、DB 路径、IP、daemon 原始日志或 Windows 敏感路径。
-- `real_read_enabled=false` / `real_read_enabled_after=false` 保持。
+- 未在状态卡或回报中摘录真实群名、真实消息正文、真实会话、真实成员、客户名单、wxid/key/salt、DB path、IP、daemon 日志。
+- `real_read_enabled=false` 保持。
 
 ## 剩余风险
 
-- 本轮只用 fake/stub 验证，没有在 Windows 执行真实会话探针或真实首读。
-- Windows wx-cli 实际 `sessions --json` 字段形态仍需发布后用 count/status smoke 验证；不得输出真实会话名。
-- all scope 会把检测到的群落成本地可管理监控群；过滤规则已收紧，但真实环境仍需观察 excluded count 是否合理。
+- 本棒未改前台 UI。若 Windows 页面仍显示 safe 字段或旧缓存字段，需要前台/UI做最小返工：改为消费后端主显示字段，safe 字段仅用于回报/诊断。
+- 8765 运行态未在本棒做 HTTP smoke；若监工要求 Windows 实机复验，需要发布/重载后按运行态规则复测。
 
 ## 下一棒建议
 
-- 派测试审查最小复验：重点看英文 `room/group` 非群误判已修复、英文真实群依赖结构化信号入选、旧白名单模式不回退、字段白名单不回退。
-- 复验通过后再进入发布收口 / Windows Git 发布目录拉取；当前仍不要执行 Windows persistent 首跑。
+- 前台/UI最小复验：确认群管理、消息明细、我方人员、候选审阅页消费主字段而非 safe 字段。
+- 测试审查复核：重点扫本地 UI 主字段可识别、report-safe 字段脱敏、config-center forbidden 字段不回退。
+- Windows 发布前仍需按项目规则核对 Git 发布目录和运行态来源。
+
+## 回报投递
+
+- 已追加监工回报队列完成块。
+- 已发监工：send_input 工具当前不可用，未取得 submission_id；以回报队列作为兜底入口。

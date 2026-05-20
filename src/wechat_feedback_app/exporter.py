@@ -724,6 +724,7 @@ def suggested_priority(item: dict[str, object]) -> str:
 def redact_visible_text(text: object) -> str:
     redacted = str(text or "")
     redacted = re.sub(r"(?i)wxid[_a-z0-9-]*", "[敏感信息已脱敏]", redacted)
+    redacted = re.sub(r"(?i)\bsecret[_a-z0-9-]*\b", "[敏感信息已脱敏]", redacted)
     redacted = re.sub(r"\b1[3-9]\d{9}\b", "[敏感信息已脱敏]", redacted)
     redacted = re.sub(r"\b\d{8,}\b", "[敏感信息已脱敏]", redacted)
     redacted = re.sub(r"(?i)(key|salt|daemon|raw_payload_json|content_text)", "[敏感信息已脱敏]", redacted)

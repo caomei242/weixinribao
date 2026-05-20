@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -870,21 +871,27 @@ def daily_followup_items_payload(
     rows: list[dict[str, Any]] = []
     for item in items:
         label = candidate_home_status_label(item, drafted_ids)
+        summary_text = local_ui_display_text(item.get("summary") or item.get("title") or "")
+        customer_label = local_ui_display_text(item.get("customer_name") or "未标客户")
+        module_label = local_ui_display_text(item.get("module_name") or "未标模块")
         rows.append(
             {
                 "item_id": int(item.get("id") or 0),
-                "display_id": redact_visible_text(item.get("item_code")),
-                "summary_safe": redact_visible_text(
-                    item.get("summary") or item.get("title") or ""
-                ),
+                "display_id": local_ui_display_text(item.get("item_code")),
+                "display_id_safe": redact_visible_text(item.get("item_code")),
+                "title": local_ui_display_text(item.get("title")),
+                "summary": summary_text,
+                "summary_safe": redact_visible_text(summary_text),
                 "human_status": label,
                 "home_status_label": label,
                 "action_label": candidate_home_action_label(label),
                 "risk_label": human_candidate_risk_label(item),
                 "source": source,
                 "source_label": source_label,
-                "customer_label": redact_visible_text(item.get("customer_name") or "未标客户"),
-                "module_label": redact_visible_text(item.get("module_name") or "未标模块"),
+                "customer_label": customer_label,
+                "customer_label_safe": redact_visible_text(customer_label),
+                "module_label": module_label,
+                "module_label_safe": redact_visible_text(module_label),
             }
         )
     return rows
@@ -976,7 +983,10 @@ def daily_center_today_focus_payload(
         ),
         "items": [
             {
-                "display_id": redact_visible_text(item.get("item_code")),
+                "display_id": local_ui_display_text(item.get("item_code")),
+                "display_id_safe": redact_visible_text(item.get("item_code")),
+                "title": local_ui_display_text(item.get("title")),
+                "summary": local_ui_display_text(item.get("summary") or item.get("title") or ""),
                 "summary_safe": redact_visible_text(
                     item.get("summary") or item.get("title") or ""
                 ),
@@ -1741,9 +1751,10 @@ def real_trial_latest_items_payload(config: AppConfig) -> dict[str, Any]:
     for row in rows:
         item = dict(row)
         item["risk_tags"] = parse_json_list(item.pop("risk_tags_json", "[]"))
-        item["risk_tags"] = [redact_visible_text(tag) for tag in item["risk_tags"]]
+        item["risk_tags_safe"] = [redact_visible_text(tag) for tag in item["risk_tags"]]
         for field in ["module_name", "title", "summary"]:
-            item[field] = redact_visible_text(item.get(field))
+            item[field] = local_ui_display_text(item.get(field))
+            item[f"{field}_safe"] = redact_visible_text(item.get(field))
         item["human_item_type"] = item_type_label(item.get("item_type"))
         item["source_message_count"] = int(item.get("source_message_count") or 0)
         item["extraction_reason"] = extraction_reason_for_item(item)
@@ -2256,17 +2267,19 @@ def build_candidate_inbox_items(
         item_id = int(item.get("id") or 0)
         status = "pending" if source == "real_trial" else (clean_text(item.get("status")) or "pending")
         in_draft = item_id in drafted_item_ids
+        title = local_ui_display_text(item.get("title"))
+        summary = local_ui_display_text(item.get("summary") or item.get("title") or "")
         human_items.append(
             {
                 "id": item_id,
-                "display_id": str(item.get("item_code") or ""),
+                "display_id": local_ui_display_text(item.get("item_code")),
                 "human_type": item_type_label(item.get("item_type")),
                 "human_status": human_candidate_status(status, in_draft),
                 "source_label": human_candidate_source_label(source),
                 "action_label": candidate_action_label(source, status, in_draft),
-                "summary_safe": redact_visible_text(
-                    item.get("summary") or item.get("title") or ""
-                ),
+                "title": title,
+                "summary": summary,
+                "summary_safe": redact_visible_text(summary),
                 "reason_safe": human_candidate_reason(item, source, in_draft),
                 "risk_label": human_candidate_risk_label(item),
                 "owner_label": human_candidate_owner_label(item),
@@ -3036,9 +3049,19 @@ def monitor_group_public_payload(
     verification = safe_verification_status(session.verification_status)
     counts = monitor_group_counts_in_daily_center(session)
     archived = bool(getattr(session, "archived", False))
+    group_name = local_ui_display_text(session.display_name)
+    customer_name = local_ui_display_text(session.customer_name)
+    group_type = local_ui_display_text(session.group_type)
+    module_name = local_ui_display_text(session.module_name)
+    customer_stage = local_ui_display_text(session.customer_stage)
+    owner_label = local_ui_display_text(primary_owner_name(session)) or "待指定负责人"
     payload: dict[str, Any] = {
         "group_id": monitor_group_public_id(session),
-        "group_name": redact_visible_text(session.display_name),
+        "display_name": group_name,
+        "display_name_safe": redact_visible_text(group_name),
+        "group_name": group_name,
+        "group_name_safe": redact_visible_text(group_name),
+        "redacted_group_label": redact_visible_text(group_name),
         "archived": archived,
         "enabled": bool(session.enabled),
         "enabled_label": "启用" if session.enabled else "停用",
@@ -3052,13 +3075,18 @@ def monitor_group_public_payload(
         "include_in_daily": bool(session.include_in_daily),
         "include_daily_label": "纳入日报" if session.include_in_daily else "不纳入日报",
         "counts_in_daily_center": counts,
-        "customer_name": redact_visible_text(session.customer_name),
+        "customer_name": customer_name,
+        "customer_name_safe": redact_visible_text(customer_name),
         "customer_id": local_customer_id(session.customer_name),
         "customer_match": customer_suggestion_payload(session.display_name, None, [session.customer_name]),
-        "group_type": redact_visible_text(session.group_type),
-        "module_name": redact_visible_text(session.module_name),
-        "customer_stage": redact_visible_text(session.customer_stage),
-        "owner_label": redact_visible_text(primary_owner_name(session)) or "待指定负责人",
+        "group_type": group_type,
+        "group_type_safe": redact_visible_text(group_type),
+        "module_name": module_name,
+        "module_name_safe": redact_visible_text(module_name),
+        "customer_stage": customer_stage,
+        "customer_stage_safe": redact_visible_text(customer_stage),
+        "owner_label": owner_label,
+        "owner_label_safe": redact_visible_text(owner_label),
         "configuration_status_label": monitor_group_configuration_label(session),
         "can_edit": True,
         "can_disable": bool(session.enabled and not archived),
@@ -3070,23 +3098,35 @@ def monitor_group_public_payload(
         "can_trial_read": bool(session.enabled and not archived),
     }
     if detail:
+        channel_name = local_ui_display_text(session.channel_name)
+        trial_scope = local_ui_display_text(session.trial_scope) or "最近50条"
+        reply_notes = local_ui_display_text(session.reply_notes)
+        owner_names = local_ui_display_list(normalized_owner_names(session))
+        common_contacts = local_ui_display_list(list(session.common_contacts))
+        internal_people = local_ui_display_list(list(session.internal_people))
         payload.update(
             {
-                "customer_name": redact_visible_text(session.customer_name),
+                "customer_name": customer_name,
+                "customer_name_safe": redact_visible_text(customer_name),
                 "customer_id": local_customer_id(session.customer_name),
-                "channel_name": redact_visible_text(session.channel_name),
-                "owner_name": redact_visible_text(primary_owner_name(session)),
-                "owner_names": [
-                    redact_visible_text(person) for person in normalized_owner_names(session)
+                "channel_name": channel_name,
+                "channel_name_safe": redact_visible_text(channel_name),
+                "owner_name": primary_owner_name(session),
+                "owner_name_safe": redact_visible_text(primary_owner_name(session)),
+                "owner_names": owner_names,
+                "owner_names_safe": [redact_visible_text(person) for person in owner_names],
+                "common_contacts": common_contacts,
+                "common_contacts_safe": [
+                    redact_visible_text(contact) for contact in common_contacts
                 ],
-                "common_contacts": [
-                    redact_visible_text(contact) for contact in session.common_contacts
+                "internal_people": internal_people,
+                "internal_people_safe": [
+                    redact_visible_text(person) for person in internal_people
                 ],
-                "internal_people": [
-                    redact_visible_text(person) for person in session.internal_people
-                ],
-                "trial_scope": redact_visible_text(session.trial_scope) or "最近50条",
-                "reply_notes": redact_visible_text(session.reply_notes),
+                "trial_scope": trial_scope,
+                "trial_scope_safe": redact_visible_text(trial_scope),
+                "reply_notes": reply_notes,
+                "reply_notes_safe": redact_visible_text(reply_notes),
                 "member_options": member_options or empty_monitor_group_member_options(),
                 "member_name_options": (member_options or empty_monitor_group_member_options())["names"],
             }
@@ -4086,18 +4126,33 @@ def internal_person_public_payload(
     conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     aliases = normalized_person_aliases(person)
+    person_name = local_ui_display_text(person.person_name)
+    wechat_display_name = local_ui_display_text(person.wechat_display_name)
+    modules = [
+        local_ui_display_text(module)
+        for module in person.modules
+        if local_ui_display_text(module)
+    ]
+    notes = local_ui_display_text(getattr(person, "notes", ""))
     return {
         "person_id": person_public_id(person),
-        "person_name": redact_visible_text(person.person_name),
-        "name": redact_visible_text(person.person_name),
-        "wechat_display_name": redact_visible_text(person.wechat_display_name),
+        "person_name": person_name,
+        "person_name_safe": redact_visible_text(person_name),
+        "name": person_name,
+        "name_safe": redact_visible_text(person_name),
+        "wechat_display_name": wechat_display_name,
+        "wechat_display_name_safe": redact_visible_text(wechat_display_name),
         "common_names": aliases,
+        "common_names_safe": [redact_visible_text(alias) for alias in aliases],
         "aliases": aliases,
+        "aliases_safe": [redact_visible_text(alias) for alias in aliases],
         "role": clean_text(person.role) or "我方人员",
-        "modules": [redact_visible_text(module) for module in person.modules],
+        "modules": modules,
+        "modules_safe": [redact_visible_text(module) for module in modules],
         "enabled": bool(person.enabled),
         "enabled_label": "启用" if person.enabled else "停用",
-        "notes": redact_visible_text(getattr(person, "notes", "")),
+        "notes": notes,
+        "notes_safe": redact_visible_text(notes),
         "initial_identity": "我方人员",
         "confidence": "已匹配" if aliases else "可能是",
         "requires_display_name": False,
@@ -4128,8 +4183,8 @@ def internal_people_suggestions_payload(
             "source_summary": internal_people_source_summary(config, conn),
             "safety": internal_people_safety_payload(config),
         }
-    safe_query = safe_member_display_name(query)
-    if not safe_query:
+    display_query = local_ui_display_text(query)
+    if not display_query:
         return {
             "status": "empty",
             "requires_display_name": False,
@@ -4141,11 +4196,12 @@ def internal_people_suggestions_payload(
             "source_summary": internal_people_source_summary(config, conn),
             "safety": internal_people_safety_payload(config),
         }
-    suggestions = build_internal_person_suggestions(config, conn, safe_query)
+    suggestions = build_internal_person_suggestions(config, conn, display_query)
     return {
         "status": "ok",
         "requires_display_name": False,
-        "query_label": redact_visible_text(safe_query),
+        "query_label": display_query,
+        "query_label_safe": redact_visible_text(display_query),
         "count": len(suggestions),
         "suggestions": suggestions,
         "suggestion_contract": internal_people_suggestion_contract(),
@@ -4161,10 +4217,10 @@ def save_internal_person_payload(
     person_id: str | None = None,
 ) -> dict[str, Any]:
     raw_wechat_id = clean_text(payload.get("wechat_id"))
-    display_name = safe_member_display_name(
+    display_name = local_ui_display_text(
         payload.get("wechat_display_name") or payload.get("display_name")
     )
-    person_name = safe_member_display_name(
+    person_name = local_ui_display_text(
         payload.get("person_name") or payload.get("name")
     )
     if raw_wechat_id and not (display_name or person_name):
@@ -4201,7 +4257,7 @@ def save_internal_person_payload(
     person.role = clean_text(payload.get("role")) or clean_text(person.role) or "我方人员"
     person.modules = clean_text_list(payload.get("modules"))
     person.enabled = parse_bool(payload.get("enabled"), True)
-    person.notes = redact_visible_text(clean_text(payload.get("notes")))
+    person.notes = local_ui_display_text(payload.get("notes"))
     config.wx_cli.real_read_enabled = False
     if conn is not None:
         upsert_internal_person_aliases(conn, person)
@@ -4271,19 +4327,27 @@ def build_internal_person_suggestions(
     if not scored:
         scored.append(
             {
-                "person_name": redact_visible_text(query),
-                "wechat_display_name": redact_visible_text(query),
+                "person_name": local_ui_display_text(query),
+                "person_name_safe": redact_visible_text(query),
+                "wechat_display_name": local_ui_display_text(query),
+                "wechat_display_name_safe": redact_visible_text(query),
                 "suggested_fields": {
-                    "person_name": redact_visible_text(query),
-                    "wechat_display_name": redact_visible_text(query),
-                    "aliases": [redact_visible_text(query)],
+                    "person_name": local_ui_display_text(query),
+                    "person_name_safe": redact_visible_text(query),
+                    "wechat_display_name": local_ui_display_text(query),
+                    "wechat_display_name_safe": redact_visible_text(query),
+                    "aliases": [local_ui_display_text(query)],
+                    "aliases_safe": [redact_visible_text(query)],
                     "role": "我方人员",
                     "modules": [],
                 },
-                "common_names": [redact_visible_text(query)],
-                "aliases": [redact_visible_text(query)],
+                "common_names": [local_ui_display_text(query)],
+                "common_names_safe": [redact_visible_text(query)],
+                "aliases": [local_ui_display_text(query)],
+                "aliases_safe": [redact_visible_text(query)],
                 "role": "我方人员",
                 "modules": [],
+                "modules_safe": [],
                 "recent_appearance": recent_appearance_payload(conn, query),
                 "initial_identity": "待人工确认",
                 "confidence": "未找到",
@@ -4301,22 +4365,37 @@ def internal_person_suggestion_item(
     candidate: dict[str, Any],
     confidence: str,
 ) -> dict[str, Any]:
-    display = str(candidate["display_name"])
+    display = local_ui_display_text(candidate["display_name"])
     aliases = unique_safe_member_names(list(candidate.get("aliases", [])) + [display])
+    person_name = local_ui_display_text(candidate.get("person_name") or display)
+    modules = [
+        local_ui_display_text(module)
+        for module in candidate.get("modules", [])
+        if local_ui_display_text(module)
+    ]
     return {
-        "person_name": redact_visible_text(candidate.get("person_name") or display),
-        "wechat_display_name": redact_visible_text(display),
+        "person_name": person_name,
+        "person_name_safe": redact_visible_text(person_name),
+        "wechat_display_name": display,
+        "wechat_display_name_safe": redact_visible_text(display),
         "suggested_fields": {
-            "person_name": redact_visible_text(candidate.get("person_name") or display),
-            "wechat_display_name": redact_visible_text(display),
+            "person_name": person_name,
+            "person_name_safe": redact_visible_text(person_name),
+            "wechat_display_name": display,
+            "wechat_display_name_safe": redact_visible_text(display),
             "aliases": aliases,
+            "aliases_safe": [redact_visible_text(alias) for alias in aliases],
             "role": "我方人员",
-            "modules": [redact_visible_text(module) for module in candidate.get("modules", [])],
+            "modules": modules,
+            "modules_safe": [redact_visible_text(module) for module in modules],
         },
         "common_names": aliases,
+        "common_names_safe": [redact_visible_text(alias) for alias in aliases],
         "aliases": aliases,
+        "aliases_safe": [redact_visible_text(alias) for alias in aliases],
         "role": "我方人员",
-        "modules": [redact_visible_text(module) for module in candidate.get("modules", [])],
+        "modules": modules,
+        "modules_safe": [redact_visible_text(module) for module in modules],
         "recent_appearance": recent_appearance_payload(conn, display),
         "initial_identity": "我方人员" if confidence == "已匹配" else "待人工确认",
         "confidence": confidence,
@@ -4344,7 +4423,7 @@ def internal_people_candidate_sources(
         if not person.enabled:
             continue
         aliases = normalized_person_aliases(person)
-        display = safe_member_display_name(person.wechat_display_name or person.person_name)
+        display = clean_text(person.wechat_display_name or person.person_name)
         if display:
             candidates.append(
                 {
@@ -4382,7 +4461,7 @@ def internal_people_candidate_sources(
             )
     unique: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
-        display = safe_member_display_name(candidate.get("display_name"))
+        display = clean_text(candidate.get("display_name"))
         if not display:
             continue
         row = unique.setdefault(display, {**candidate, "aliases": [], "modules": []})
@@ -4438,7 +4517,8 @@ def recent_appearance_payload(
     groups = [
         {
             "group_id": f"mg-{hashlib.sha256(str(row['external_id']).encode('utf-8')).hexdigest()[:12]}",
-            "group_name": redact_visible_text(row["display_name"]),
+            "group_name": clean_text(row["display_name"]),
+            "group_name_safe": redact_visible_text(row["display_name"]),
             "message_count": int(row["message_count"] or 0),
         }
         for row in rows
@@ -4674,14 +4754,20 @@ def messages_v1_payload(
     for row in rows:
         row_group_id = f"mg-{hashlib.sha256(str(row['external_id']).encode('utf-8')).hexdigest()[:12]}"
         ref = f"m-{int(row['id']):04d}"
+        group_name = local_ui_display_text(row["display_name"])
+        customer_label = local_ui_display_text(row["customer_name"] or "未标客户")
+        module_label = local_ui_display_text(row["module_name"] or "未标模块")
         messages.append(
             {
                 "message_ref": ref,
                 "sent_at": str(row["sent_at"] or ""),
                 "group_id": row_group_id,
-                "group_name": redact_visible_text(row["display_name"]),
-                "customer_label": redact_visible_text(row["customer_name"] or "未标客户"),
-                "module_label": redact_visible_text(row["module_name"] or "未标模块"),
+                "group_name": group_name,
+                "group_name_safe": redact_visible_text(group_name),
+                "customer_label": customer_label,
+                "customer_label_safe": redact_visible_text(customer_label),
+                "module_label": module_label,
+                "module_label_safe": redact_visible_text(module_label),
                 "sender_display_name": safe_sender_display(row["sender_display_name"]),
                 "sender_identity": safe_sender_role(row["sender_role"]),
                 "sender_identity_label": identity_label(row["sender_role"]),
@@ -4746,11 +4832,18 @@ def message_group_options(
         }
     ]
     for session in config.sessions:
+        group_name = local_ui_display_text(session.display_name)
+        customer_label = local_ui_display_text(session.customer_name or "未标客户")
+        module_label = local_ui_display_text(session.module_name or "未标模块")
         groups.append(
             {
                 "group_id": monitor_group_public_id(session),
-                "group_name": redact_visible_text(session.display_name),
-                "customer_label": redact_visible_text(session.customer_name or "未标客户"),
+                "group_name": group_name,
+                "group_name_safe": redact_visible_text(group_name),
+                "customer_label": customer_label,
+                "customer_label_safe": redact_visible_text(customer_label),
+                "module_label": module_label,
+                "module_label_safe": redact_visible_text(module_label),
                 "enabled": bool(session.enabled),
                 "archived": bool(getattr(session, "archived", False)),
                 "status_label": monitor_group_status_label(session),
@@ -6984,6 +7077,40 @@ def write_config_center_yaml(config: AppConfig) -> None:
 
 def clean_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def local_ui_display_text(value: Any) -> str:
+    """Keep local UI labels readable while still blocking hard-forbidden tokens."""
+    text = clean_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"(?i)wxid[_a-z0-9-]*", "[敏感信息已脱敏]", text)
+    text = re.sub(r"(?i)secret[_a-z0-9-]*", "[敏感信息已脱敏]", text)
+    text = re.sub(
+        r"(?i)(key|salt|daemon|raw_payload_json|raw_payload|content_text)",
+        "[敏感信息已脱敏]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b[A-Z]:\\(?:[^\\\s|，。；,;]+\\)*[^\\\s|，。；,;]+",
+        "[路径已脱敏]",
+        text,
+    )
+    text = re.sub(
+        r"/(?:Users|private|var|tmp|Applications|Volumes)(?:/[^\s|，。；,;]+)+",
+        "[路径已脱敏]",
+        text,
+    )
+    text = re.sub(
+        r"(?:^|\s)(?:微信agent专项|data|exports|config|logs)(?:/[^\s|，。；,;]+)+",
+        " [路径已脱敏]",
+        text,
+    )
+    return text.strip()
+
+
+def local_ui_display_list(values: list[Any]) -> list[str]:
+    return unique_clean_text([local_ui_display_text(value) for value in values])
 
 
 def now_local_iso() -> str:
