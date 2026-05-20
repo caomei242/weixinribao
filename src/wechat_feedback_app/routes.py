@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import json
 import hashlib
 import sqlite3
-import json
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .collector import collect_messages, latest_run
+from .collector import collect_messages, collect_normalized_messages, latest_run
 from .config import AppConfig, PersonConfig, RiskConfig, SessionConfig
 from .db import setup_database
 from .daily_control import (
@@ -36,9 +36,35 @@ from .exporter import (
 from .wx_cli_adapter import (
     WxCliUnavailable,
     fetch_group_roster_members,
+    map_history_payload,
+    run_wx_cli_json,
     test_connection,
     wx_cli_readiness,
 )
+
+LEGACY_REAL_TRIAL_MAX_LOOKBACK_HOURS = 2
+LEGACY_REAL_TRIAL_MAX_LIMIT = 50
+CONFIGURABLE_REAL_TRIAL_HARD_SAFETY_DAYS = 365
+CONFIGURABLE_REAL_TRIAL_HARD_MAX_GROUPS = 50
+CONFIGURABLE_REAL_TRIAL_HARD_MAX_TOTAL_MESSAGES = 10000
+CONFIGURABLE_REAL_TRIAL_HARD_MAX_MESSAGES_PER_GROUP = 1000
+CONFIGURABLE_REAL_TRIAL_HARD_MAX_BATCHES = 12
+CONFIGURABLE_REAL_TRIAL_DEFAULT_MAX_GROUPS = 20
+CONFIGURABLE_REAL_TRIAL_DEFAULT_MAX_TOTAL_MESSAGES = 5000
+CONFIGURABLE_REAL_TRIAL_DEFAULT_MAX_MESSAGES_PER_GROUP = 500
+CONFIGURABLE_REAL_TRIAL_DEFAULT_BATCH_LIMIT = 1
+CONFIGURABLE_REAL_TRIAL_PRESETS = {
+    "30d",
+    "configurable",
+    "configurable_window",
+    "expanded",
+    "expanded30d",
+    "expanded_30d",
+    "last30days",
+    "last_30_days",
+    "multi_group_30d",
+    "recent30days",
+}
 
 
 def create_app(config: AppConfig):
@@ -64,11 +90,12 @@ def create_app(config: AppConfig):
 
     @app.get("/api/status")
     def status():
+        readiness = wx_cli_readiness(config)
         return {
             **safe_status_payload(config),
             "latest_run": latest_run(conn),
-            "connection": test_connection(config),
-            "wx_cli_ready": wx_cli_readiness(config),
+            "connection": safe_status_connection_payload(readiness),
+            "wx_cli_ready": safe_wx_cli_public_payload(readiness),
         }
 
     @app.get("/api/inbox/v1")
@@ -352,11 +379,11 @@ def create_app(config: AppConfig):
 
     @app.get("/api/wx-cli/test")
     def wx_cli_test():
-        return test_connection(config)
+        return safe_wx_cli_public_payload(test_connection(config))
 
     @app.get("/api/wx-cli/readiness")
     def wx_cli_ready():
-        return wx_cli_readiness(config)
+        return safe_wx_cli_public_payload(wx_cli_readiness(config))
 
     @app.get("/api/real-trial/latest")
     def real_trial_latest():
@@ -392,7 +419,7 @@ def create_app(config: AppConfig):
 
     @app.post("/api/real-trial/run")
     def real_trial_run(payload: dict[str, Any]):
-        return real_trial_run_plan(config, payload)
+        return real_trial_run_plan(config, payload, conn=conn)
 
     @app.get("/api/daily-control")
     def daily_control(control_date: Optional[str] = None):
@@ -449,6 +476,37 @@ def parse_bool(value: Any, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def safe_wx_cli_public_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": clean_text(payload.get("status")) or "unknown",
+        "error_code": clean_text(payload.get("error_code")),
+        "message": redact_visible_text(clean_text(payload.get("message"))),
+        "command": clean_text(payload.get("command")),
+        "returncode": clean_text(payload.get("returncode")),
+        "wx_cli_status": clean_text(payload.get("wx_cli_status")),
+        "binary_configured": parse_bool(payload.get("binary_configured"), False),
+        "is_executable": parse_bool(payload.get("is_executable"), False),
+        "session_count": clean_text(payload.get("session_count")),
+        "next_action": clean_text(payload.get("next_action")),
+        "binary_path_returned": False,
+        "configured_binary_returned": False,
+    }
+
+
+def safe_status_connection_payload(readiness: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "status": "not_checked",
+        "error_code": "connection_test_not_run",
+        "message": "状态摘要不执行会话探测；需要时请用户显式触发连接测试。",
+        "wx_cli_status": readiness.get("status"),
+        "binary_configured": readiness.get("binary_configured"),
+        "is_executable": readiness.get("is_executable"),
+        "session_count": "0",
+        "next_action": readiness.get("next_action"),
+    }
+    return safe_wx_cli_public_payload(payload)
 
 
 def export_templates_payload(
@@ -1487,8 +1545,15 @@ def safe_status_payload(config: AppConfig) -> dict[str, Any]:
             "enabled": config.wx_cli.real_read_enabled,
             "session_configured": bool(config.wx_cli.real_allowed_session.strip()),
             "enabled_whitelist_count": enabled_whitelist_count,
-            "lookback_hours": min(max(1, int(config.wx_cli.real_lookback_hours)), 2),
-            "limit": min(max(1, int(config.wx_cli.real_limit)), 50),
+            "lookback_hours": min(
+                max(1, int(config.wx_cli.real_lookback_hours)),
+                LEGACY_REAL_TRIAL_MAX_LOOKBACK_HOURS,
+            ),
+            "limit": min(
+                max(1, int(config.wx_cli.real_limit)),
+                LEGACY_REAL_TRIAL_MAX_LIMIT,
+            ),
+            "expanded_trial": expanded_real_trial_contract_payload(config),
         },
     }
 
@@ -1516,9 +1581,14 @@ def safe_config_payload(config: AppConfig) -> dict[str, Any]:
                 config.wx_cli.real_allowed_session.strip()
             ),
             "real_lookback_hours": min(
-                max(1, int(config.wx_cli.real_lookback_hours)), 2
+                max(1, int(config.wx_cli.real_lookback_hours)),
+                LEGACY_REAL_TRIAL_MAX_LOOKBACK_HOURS,
             ),
-            "real_limit": min(max(1, int(config.wx_cli.real_limit)), 50),
+            "real_limit": min(
+                max(1, int(config.wx_cli.real_limit)),
+                LEGACY_REAL_TRIAL_MAX_LIMIT,
+            ),
+            "expanded_trial": expanded_real_trial_contract_payload(config),
         },
         "collector": {
             "interval_minutes": config.collector.interval_minutes,
@@ -4885,10 +4955,17 @@ def config_center_payload(
                 "sensitive_keywords": list(config.risk.sensitive_keywords),
             },
             "trial_defaults": {
-                "lookback_hours": min(max(1, int(config.wx_cli.real_lookback_hours)), 2),
-                "limit": min(max(1, int(config.wx_cli.real_limit)), 50),
+                "lookback_hours": min(
+                    max(1, int(config.wx_cli.real_lookback_hours)),
+                    LEGACY_REAL_TRIAL_MAX_LOOKBACK_HOURS,
+                ),
+                "limit": min(
+                    max(1, int(config.wx_cli.real_limit)),
+                    LEGACY_REAL_TRIAL_MAX_LIMIT,
+                ),
                 "start_at": config.wx_cli.real_start_at,
                 "end_at": config.wx_cli.real_end_at,
+                "expanded_trial": expanded_real_trial_contract_payload(config),
             },
         },
         "customer_options": customer_options,
@@ -4900,9 +4977,10 @@ def config_center_payload(
             "default_real_read_enabled": False,
             "save_triggers_collection": False,
             "requires_confirmation": True,
-            "max_limit": 50,
-            "max_lookback_hours": 2,
+            "max_limit": LEGACY_REAL_TRIAL_MAX_LIMIT,
+            "max_lookback_hours": LEGACY_REAL_TRIAL_MAX_LOOKBACK_HOURS,
             "requires_single_enabled_whitelist": True,
+            "expanded_trial": expanded_real_trial_contract_payload(config),
             "fixture_service_notice": config.wx_cli.mode != "real",
         },
         "save_target": "config/app.yaml",
@@ -5020,13 +5098,59 @@ def save_config_center_payload(
     trial_defaults = payload.get("trial_defaults", {})
     if isinstance(trial_defaults, dict):
         config.wx_cli.real_lookback_hours = clamp_int(
-            trial_defaults.get("lookback_hours"), minimum=1, maximum=2, default=2
+            trial_defaults.get("lookback_hours"),
+            minimum=1,
+            maximum=LEGACY_REAL_TRIAL_MAX_LOOKBACK_HOURS,
+            default=LEGACY_REAL_TRIAL_MAX_LOOKBACK_HOURS,
         )
         config.wx_cli.real_limit = clamp_int(
-            trial_defaults.get("limit"), minimum=1, maximum=50, default=50
+            trial_defaults.get("limit"),
+            minimum=1,
+            maximum=LEGACY_REAL_TRIAL_MAX_LIMIT,
+            default=LEGACY_REAL_TRIAL_MAX_LIMIT,
         )
         config.wx_cli.real_start_at = clean_text(trial_defaults.get("start_at"))
         config.wx_cli.real_end_at = clean_text(trial_defaults.get("end_at"))
+        expanded_defaults = trial_defaults.get("expanded_trial", {})
+    else:
+        expanded_defaults = {}
+    payload_expanded_defaults = payload.get("expanded_trial_defaults", {})
+    if isinstance(payload_expanded_defaults, dict) and payload_expanded_defaults:
+        expanded_defaults = payload_expanded_defaults
+    if isinstance(expanded_defaults, dict):
+        config.wx_cli.expanded_real_lookback_days = clamp_float(
+            expanded_defaults.get("max_lookback_days")
+            or expanded_defaults.get("max_allowed_lookback_days")
+            or expanded_defaults.get("lookback_days"),
+            minimum=0.01,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_SAFETY_DAYS,
+            default=30,
+        )
+        config.wx_cli.expanded_real_max_groups = clamp_int(
+            expanded_defaults.get("max_groups"),
+            minimum=1,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_MAX_GROUPS,
+            default=CONFIGURABLE_REAL_TRIAL_DEFAULT_MAX_GROUPS,
+        )
+        config.wx_cli.expanded_real_max_total_messages = clamp_int(
+            expanded_defaults.get("max_total_messages"),
+            minimum=1,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_MAX_TOTAL_MESSAGES,
+            default=CONFIGURABLE_REAL_TRIAL_DEFAULT_MAX_TOTAL_MESSAGES,
+        )
+        config.wx_cli.expanded_real_max_messages_per_group = clamp_int(
+            expanded_defaults.get("max_messages_per_group"),
+            minimum=1,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_MAX_MESSAGES_PER_GROUP,
+            default=CONFIGURABLE_REAL_TRIAL_DEFAULT_MAX_MESSAGES_PER_GROUP,
+        )
+        config.wx_cli.expanded_real_batch_limit = clamp_int(
+            expanded_defaults.get("batch_limit")
+            or expanded_defaults.get("max_batches"),
+            minimum=1,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_MAX_BATCHES,
+            default=CONFIGURABLE_REAL_TRIAL_DEFAULT_BATCH_LIMIT,
+        )
 
     config.wx_cli.real_read_enabled = False
     write_config_center_yaml(config)
@@ -5038,9 +5162,731 @@ def save_config_center_payload(
     }
 
 
-def real_trial_run_plan(config: AppConfig, payload: dict[str, Any]) -> dict[str, Any]:
+def expanded_real_trial_caps(config: AppConfig) -> dict[str, Any]:
+    return {
+        "max_allowed_lookback_days": clamp_float(
+            getattr(config.wx_cli, "expanded_real_lookback_days", 30),
+            minimum=0.01,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_SAFETY_DAYS,
+            default=30,
+        ),
+        "max_groups": clamp_int(
+            getattr(config.wx_cli, "expanded_real_max_groups", 20),
+            minimum=1,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_MAX_GROUPS,
+            default=CONFIGURABLE_REAL_TRIAL_DEFAULT_MAX_GROUPS,
+        ),
+        "max_total_messages": clamp_int(
+            getattr(config.wx_cli, "expanded_real_max_total_messages", 5000),
+            minimum=1,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_MAX_TOTAL_MESSAGES,
+            default=CONFIGURABLE_REAL_TRIAL_DEFAULT_MAX_TOTAL_MESSAGES,
+        ),
+        "max_messages_per_group": clamp_int(
+            getattr(config.wx_cli, "expanded_real_max_messages_per_group", 500),
+            minimum=1,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_MAX_MESSAGES_PER_GROUP,
+            default=CONFIGURABLE_REAL_TRIAL_DEFAULT_MAX_MESSAGES_PER_GROUP,
+        ),
+        "batch_limit": clamp_int(
+            getattr(config.wx_cli, "expanded_real_batch_limit", 1),
+            minimum=1,
+            maximum=CONFIGURABLE_REAL_TRIAL_HARD_MAX_BATCHES,
+            default=CONFIGURABLE_REAL_TRIAL_DEFAULT_BATCH_LIMIT,
+        ),
+    }
+
+
+def expanded_real_trial_contract_payload(config: AppConfig) -> dict[str, Any]:
+    caps = expanded_real_trial_caps(config)
+    return {
+        "supported": True,
+        "scope_mode": "configurable_window",
+        "default_preset": "last_30_days",
+        "default_preset_lookback_days": min(30, caps["max_allowed_lookback_days"]),
+        "default_real_read_enabled": False,
+        "one_time_only": True,
+        "multi_group_supported": True,
+        "supports_lookback_days": True,
+        "supports_start_end_time": True,
+        "test_wechat_account_required": True,
+        "authorization_required": True,
+        "one_time_authorization_token_required": True,
+        "execute_once_field": "execute_once",
+        "will_execute_without_explicit_authorization": False,
+        "max_allowed_lookback_days": caps["max_allowed_lookback_days"],
+        "max_lookback_days": caps["max_allowed_lookback_days"],
+        "max_groups": caps["max_groups"],
+        "max_total_messages": caps["max_total_messages"],
+        "max_messages_per_group": caps["max_messages_per_group"],
+        "batch_limit": caps["batch_limit"],
+        "windows_config_fields": {
+            "max_allowed_lookback_days": "wx_cli.expanded_real_lookback_days",
+            "max_groups": "wx_cli.expanded_real_max_groups",
+            "max_total_messages": "wx_cli.expanded_real_max_total_messages",
+            "max_messages_per_group": "wx_cli.expanded_real_max_messages_per_group",
+            "batch_limit": "wx_cli.expanded_real_batch_limit",
+        },
+    }
+
+
+def normalized_real_trial_scope_mode(payload: dict[str, Any]) -> str:
+    raw = clean_text(
+        payload.get("scope_mode")
+        or payload.get("trial_mode")
+        or payload.get("mode")
+        or payload.get("preset")
+    )
+    normalized = (
+        raw.lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+        .replace("/", "_")
+    )
+    compact = normalized.replace("_", "")
+    if normalized in CONFIGURABLE_REAL_TRIAL_PRESETS or compact in CONFIGURABLE_REAL_TRIAL_PRESETS:
+        return "configurable_window"
+    return "legacy_recent50"
+
+
+def requested_group_tokens(payload: dict[str, Any]) -> list[str]:
+    values: list[Any] = []
+    for key in (
+        "group_ids",
+        "monitor_group_ids",
+        "whitelist_group_ids",
+        "session_ids",
+        "sessions",
+        "groups",
+    ):
+        value = payload.get(key)
+        if not value:
+            continue
+        if isinstance(value, list):
+            values.extend(value)
+        else:
+            values.append(value)
+
+    tokens: list[str] = []
+    for value in values:
+        if isinstance(value, dict):
+            for key in ("external_id", "group_id", "id", "display_name", "name"):
+                token = clean_text(value.get(key))
+                if token:
+                    tokens.append(token)
+        else:
+            tokens.extend(clean_text_list(value))
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped
+
+
+def expanded_trial_blocked(
+    error_code: str,
+    message: str,
+    *,
+    selected_group_count: int = 0,
+    window_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    window_summary = window_summary or {}
+    return {
+        "status": "blocked",
+        "will_run": False,
+        "real_read_enabled": False,
+        "real_read_enabled_after": False,
+        "error_code": error_code,
+        "reason_code": error_code,
+        "message": message,
+        "scope": {
+            "scope_mode": "configurable_window",
+            "selected_group_count": selected_group_count,
+            "groups_returned": False,
+            "session_names_returned": False,
+            **window_summary,
+        },
+        "limits": window_summary,
+        "failure_summary": {
+            "status": "blocked",
+            "error_code": error_code,
+            "error_count": 1,
+            "failed_group_count": selected_group_count,
+            "details_returned": False,
+        },
+    }
+
+
+def parse_trial_int(value: Any, default: int, error_code: str) -> tuple[int | None, str | None]:
+    try:
+        parsed = int(value if value not in (None, "") else default)
+    except (TypeError, ValueError):
+        return None, error_code
+    return parsed, None
+
+
+def parse_trial_datetime(value: Any) -> datetime | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(f"{normalized}T00:00:00")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def ceil_days(delta: timedelta) -> int:
+    seconds = delta.total_seconds()
+    if seconds <= 0:
+        return 0
+    full_days = int(seconds // 86400)
+    return full_days if seconds % 86400 == 0 else full_days + 1
+
+
+def trial_window_summary(
+    payload: dict[str, Any],
+    caps: dict[str, int],
+    *,
+    now: datetime | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    max_allowed = caps["max_allowed_lookback_days"]
+    start_raw = clean_text(payload.get("start_time") or payload.get("start_at"))
+    end_raw = clean_text(payload.get("end_time") or payload.get("end_at"))
+    lookback_provided = clean_text(payload.get("lookback_days")) != ""
+    if start_raw or end_raw:
+        if not (start_raw and end_raw):
+            return None, "expanded_trial_time_range_invalid"
+        start_at = parse_trial_datetime(start_raw)
+        end_at = parse_trial_datetime(end_raw)
+        if start_at is None or end_at is None or end_at <= start_at:
+            return None, "expanded_trial_time_range_invalid"
+        effective_days = ceil_days(end_at - start_at)
+        requested_days = effective_days
+    else:
+        requested_days, error_code = parse_trial_int(
+            payload.get("lookback_days"),
+            30,
+            "expanded_trial_lookback_days_invalid",
+        )
+        if error_code or requested_days is None or requested_days < 1:
+            return None, "expanded_trial_lookback_days_invalid"
+        effective_days = requested_days
+        end_at = now or datetime.now(timezone.utc)
+        if end_at.tzinfo is None:
+            end_at = end_at.replace(tzinfo=timezone.utc)
+        end_at = end_at.astimezone(timezone.utc)
+        start_at = end_at - timedelta(days=effective_days)
+
+    limit_reason = "within_configured_limit"
+    if effective_days > max_allowed:
+        limit_reason = "exceeds_configured_lookback"
+    return {
+        "requested_lookback_days": requested_days,
+        "effective_lookback_days": effective_days,
+        "max_allowed_lookback_days": max_allowed,
+        "max_lookback_days": max_allowed,
+        "window_start": start_at.isoformat(timespec="seconds"),
+        "window_end": end_at.isoformat(timespec="seconds"),
+        "limit_reason": limit_reason,
+        "time_range_mode": "explicit_range" if start_raw or end_raw else "lookback_days",
+        "default_window_used": not lookback_provided and not (start_raw or end_raw),
+    }, None
+
+
+def execution_requested(payload: dict[str, Any]) -> bool:
+    return any(
+        parse_bool(payload.get(key), False)
+        for key in (
+            "execute_once",
+            "run_once",
+            "execute_real_trial_once",
+            "open_execution_path",
+        )
+    )
+
+
+def one_time_authorization_present(payload: dict[str, Any]) -> bool:
+    marker = any(
+        parse_bool(payload.get(key), False)
+        for key in (
+            "one_time_authorization_marker",
+            "one_time_authorization_confirmed",
+            "authorization_marker",
+        )
+    )
+    token = clean_text(
+        payload.get("one_time_authorization_token")
+        or payload.get("authorization_token")
+        or payload.get("one_time_token")
+    )
+    return marker or bool(token)
+
+
+def history_since_text(window_summary: dict[str, Any]) -> str:
+    start = parse_trial_datetime(window_summary.get("window_start"))
+    if start is None:
+        start = datetime.now(timezone.utc) - timedelta(
+            days=int(window_summary.get("effective_lookback_days") or 1)
+        )
+    return start.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def configurable_history_args(
+    session: SessionConfig, window_summary: dict[str, Any], limit: int
+) -> list[str]:
+    return [
+        "history",
+        session.display_name or session.external_id,
+        "--since",
+        history_since_text(window_summary),
+        "-n",
+        str(limit),
+        "--json",
+    ]
+
+
+def execution_summary_from_result(result: Any) -> dict[str, Any]:
+    if hasattr(result, "__dict__"):
+        data = dict(result.__dict__)
+    elif isinstance(result, dict):
+        data = dict(result)
+    else:
+        data = {}
+    status = clean_text(data.get("status")) or "failed"
+    error_code = clean_text(data.get("error_code"))
+    return {
+        "status": status,
+        "error_code": error_code,
+        "sessions_total": int(data.get("sessions_total") or 0),
+        "sessions_success": int(data.get("sessions_success") or 0),
+        "sessions_failed": int(data.get("sessions_failed") or 0),
+        "raw_messages_seen": int(data.get("raw_messages_seen") or 0),
+        "raw_messages_inserted": int(data.get("raw_messages_inserted") or 0),
+        "raw_messages_duplicated": int(data.get("raw_messages_duplicated") or 0),
+        "candidate_items_created": int(data.get("candidate_items_created") or 0),
+        "candidate_items_updated": int(data.get("candidate_items_updated") or 0),
+    }
+
+
+def execute_configurable_real_trial_once(
+    config: AppConfig,
+    conn: sqlite3.Connection | None,
+    selected_sessions: list[SessionConfig],
+    window_summary: dict[str, Any],
+    limits: dict[str, int],
+) -> dict[str, Any]:
+    if conn is None:
+        return {
+            "status": "blocked",
+            "error_code": "real_trial_execution_entry_unavailable",
+            "sessions_total": len(selected_sessions),
+            "sessions_success": 0,
+            "sessions_failed": len(selected_sessions),
+            "raw_messages_seen": 0,
+            "raw_messages_inserted": 0,
+            "raw_messages_duplicated": 0,
+            "candidate_items_created": 0,
+            "candidate_items_updated": 0,
+        }
+    if config.wx_cli.mode != "real":
+        return {
+            "status": "blocked",
+            "error_code": "real_trial_real_mode_required",
+            "sessions_total": len(selected_sessions),
+            "sessions_success": 0,
+            "sessions_failed": len(selected_sessions),
+            "raw_messages_seen": 0,
+            "raw_messages_inserted": 0,
+            "raw_messages_duplicated": 0,
+            "candidate_items_created": 0,
+            "candidate_items_updated": 0,
+        }
+
+    connection = test_connection(config)
+    if connection["status"] != "ok":
+        return {
+            "status": "failed",
+            "error_code": clean_text(connection.get("error_code")) or connection["status"],
+            "sessions_total": len(selected_sessions),
+            "sessions_success": 0,
+            "sessions_failed": len(selected_sessions),
+            "raw_messages_seen": 0,
+            "raw_messages_inserted": 0,
+            "raw_messages_duplicated": 0,
+            "candidate_items_created": 0,
+            "candidate_items_updated": 0,
+        }
+
+    messages = []
+    failed = 0
+    for session in selected_sessions:
+        result = run_wx_cli_json(
+            config,
+            configurable_history_args(
+                session,
+                window_summary,
+                int(limits["requested_messages_per_group"]),
+            ),
+        )
+        if result.status != "ok":
+            failed += 1
+            continue
+        messages.extend(map_history_payload(result.parsed, session))
+
+    if failed and not messages:
+        return {
+            "status": "failed",
+            "error_code": "real_trial_history_failed",
+            "sessions_total": len(selected_sessions),
+            "sessions_success": 0,
+            "sessions_failed": failed,
+            "raw_messages_seen": 0,
+            "raw_messages_inserted": 0,
+            "raw_messages_duplicated": 0,
+            "candidate_items_created": 0,
+            "candidate_items_updated": 0,
+        }
+
+    collected = collect_normalized_messages(
+        config,
+        conn,
+        messages,
+        mode="real_trial_once",
+    )
+    summary = execution_summary_from_result(collected)
+    summary["sessions_total"] = len(selected_sessions)
+    summary["sessions_failed"] = failed
+    summary["sessions_success"] = max(0, len(selected_sessions) - failed)
+    summary["status"] = "partial_failed" if failed else summary["status"]
+    summary["error_code"] = "real_trial_partial_failed" if failed else summary["error_code"]
+    return summary
+
+
+def expanded_real_trial_run_plan(
+    config: AppConfig,
+    payload: dict[str, Any],
+    conn: sqlite3.Connection | None = None,
+    executor: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    if not parse_bool(payload.get("confirmed"), False):
+        return {
+            "status": "needs_confirmation",
+            "will_run": False,
+            "real_read_enabled": False,
+            "error_code": "confirmation_required",
+            "message": "扩大试验前需要确认范围、授权字段和禁止项。",
+            "scope": {
+                "scope_mode": "configurable_window",
+                "groups_returned": False,
+                "session_names_returned": False,
+            },
+            "failure_summary": {
+                "status": "blocked",
+                "error_code": "confirmation_required",
+                "error_count": 1,
+                "failed_group_count": 0,
+                "details_returned": False,
+            },
+        }
+
+    authorization_confirmed = any(
+        parse_bool(payload.get(key), False)
+        for key in (
+            "authorize_expanded_real_read_trial",
+            "expanded_trial_authorized",
+            "authorization_confirmed",
+        )
+    )
+    if not authorization_confirmed:
+        return expanded_trial_blocked(
+            "expanded_trial_authorization_required",
+            "可配置时间窗口真实读取扩大试验需要单独授权；本接口未执行读取。",
+        )
+
+    test_account_confirmed = any(
+        parse_bool(payload.get(key), False)
+        for key in (
+            "test_wechat_account_confirmed",
+            "test_account_confirmed",
+            "test_wechat_account_configured",
+        )
+    )
+    if not test_account_confirmed:
+        return expanded_trial_blocked(
+            "expanded_trial_test_account_required",
+            "扩大试验需要确认使用测试微信号，不会默认使用本机配置。",
+        )
+
+    one_time_confirmed = any(
+        parse_bool(payload.get(key), False)
+        for key in ("one_time_expanded_trial", "one_time_trial", "one_time")
+    )
+    if not one_time_confirmed:
+        return expanded_trial_blocked(
+            "expanded_trial_one_time_required",
+            "扩大试验必须声明为一次性试验，不能自动定时采集。",
+        )
+
+    caps = expanded_real_trial_caps(config)
+    window_summary, error_code = trial_window_summary(payload, caps)
+    if error_code == "expanded_trial_time_range_invalid":
+        return expanded_trial_blocked(
+            "expanded_trial_time_range_invalid",
+            "扩大试验起止时间必须完整且结束时间晚于开始时间。",
+        )
+    if error_code or window_summary is None:
+        return expanded_trial_blocked(
+            "expanded_trial_lookback_days_invalid",
+            "扩大试验天数必须是正整数。",
+        )
+    if window_summary["effective_lookback_days"] > caps["max_allowed_lookback_days"]:
+        return expanded_trial_blocked(
+            "expanded_trial_lookback_days_too_large",
+            "扩大试验范围超过当前配置上限。",
+            window_summary=window_summary,
+        )
+
+    max_total_messages, error_code = parse_trial_int(
+        payload.get("max_total_messages", payload.get("limit")),
+        caps["max_total_messages"],
+        "expanded_trial_total_limit_invalid",
+    )
+    if error_code or max_total_messages is None or max_total_messages < 1:
+        return expanded_trial_blocked(
+            "expanded_trial_total_limit_invalid",
+            "扩大试验总消息上限必须是正整数。",
+        )
+    if max_total_messages > caps["max_total_messages"]:
+        return expanded_trial_blocked(
+            "expanded_trial_total_limit_too_large",
+            "扩大试验总消息上限超过安全配置。",
+        )
+
+    max_messages_per_group, error_code = parse_trial_int(
+        payload.get("max_messages_per_group"),
+        caps["max_messages_per_group"],
+        "expanded_trial_group_limit_invalid",
+    )
+    if error_code or max_messages_per_group is None or max_messages_per_group < 1:
+        return expanded_trial_blocked(
+            "expanded_trial_group_limit_invalid",
+            "扩大试验单群消息上限必须是正整数。",
+        )
+    if max_messages_per_group > caps["max_messages_per_group"]:
+        return expanded_trial_blocked(
+            "expanded_trial_group_limit_too_large",
+            "扩大试验单群消息上限超过安全配置。",
+        )
+
+    batch_limit, error_code = parse_trial_int(
+        payload.get("batch_limit", payload.get("max_batches")),
+        caps["batch_limit"],
+        "expanded_trial_batch_limit_invalid",
+    )
+    if error_code or batch_limit is None or batch_limit < 1:
+        return expanded_trial_blocked(
+            "expanded_trial_batch_limit_invalid",
+            "扩大试验批次上限必须是正整数。",
+        )
+    if batch_limit > caps["batch_limit"]:
+        return expanded_trial_blocked(
+            "expanded_trial_batch_limit_too_large",
+            "扩大试验批次上限超过安全配置。",
+        )
+
+    enabled_whitelist = [
+        session
+        for session in config.sessions
+        if session.enabled and session.is_whitelisted and not getattr(session, "archived", False)
+    ]
+    tokens = requested_group_tokens(payload)
+    include_all_enabled = parse_bool(payload.get("include_all_enabled_whitelist"), False)
+    if tokens and not include_all_enabled:
+        token_set = set(tokens)
+        selected_sessions = [
+            session
+            for session in enabled_whitelist
+            if session.external_id in token_set or session.display_name in token_set
+        ]
+        requested_group_count = len(tokens)
+    else:
+        selected_sessions = enabled_whitelist
+        requested_group_count = len(enabled_whitelist)
+
+    selected_group_count = len(selected_sessions)
+    if selected_group_count < 1:
+        return expanded_trial_blocked(
+            "expanded_trial_no_groups_selected",
+            "没有可用于扩大试验的启用白名单群。",
+        )
+    if selected_group_count > caps["max_groups"]:
+        return expanded_trial_blocked(
+            "expanded_trial_group_count_too_large",
+            "扩大试验群数量超过安全配置。",
+            selected_group_count=selected_group_count,
+        )
+
+    limits_summary = {
+        **window_summary,
+        "max_groups": caps["max_groups"],
+        "max_total_messages": caps["max_total_messages"],
+        "requested_total_messages": max_total_messages,
+        "max_messages_per_group": caps["max_messages_per_group"],
+        "requested_messages_per_group": max_messages_per_group,
+        "batch_limit": caps["batch_limit"],
+        "requested_batch_limit": batch_limit,
+    }
+    should_execute = execution_requested(payload)
+    if should_execute and not one_time_authorization_present(payload):
+        return expanded_trial_blocked(
+            "one_time_authorization_token_required",
+            "一次性真实试验执行需要授权令牌或等价授权标记。",
+            selected_group_count=selected_group_count,
+            window_summary=window_summary,
+        )
+
+    execution_result: dict[str, Any] | None = None
+    if should_execute:
+        if executor is not None:
+            execution_result = execution_summary_from_result(
+                executor(
+                    {
+                        "selected_group_count": selected_group_count,
+                        "window": dict(window_summary),
+                        "limits": dict(limits_summary),
+                        "real_read_enabled_before": bool(config.wx_cli.real_read_enabled),
+                    }
+                )
+            )
+        else:
+            real_read_before = bool(config.wx_cli.real_read_enabled)
+            try:
+                config.wx_cli.real_read_enabled = True
+                execution_result = execute_configurable_real_trial_once(
+                    config,
+                    conn,
+                    selected_sessions,
+                    window_summary,
+                    limits_summary,
+                )
+            finally:
+                config.wx_cli.real_read_enabled = False
+                if real_read_before and conn is None:
+                    config.wx_cli.real_read_enabled = False
+
+    status = "dry_run_ready"
+    error_code = "real_trial_execution_entry_not_opened"
+    reason_code = "real_trial_execution_entry_not_opened"
+    message = "扩大试验计划已生成；未打开一次性执行入口，未执行真实读取。"
+    failure_summary = {
+        "status": "not_executed",
+        "error_code": "real_trial_execution_entry_not_opened",
+        "error_count": 0,
+        "failed_group_count": 0,
+        "details_returned": False,
+    }
+    if execution_result is not None:
+        status = execution_result["status"]
+        error_code = execution_result["error_code"]
+        reason_code = error_code
+        message = "一次性真实试验执行路径已进入；响应仅返回数量和状态摘要。"
+        failure_summary = {
+            "status": execution_result["status"],
+            "error_code": execution_result["error_code"],
+            "error_count": 1 if execution_result["error_code"] else 0,
+            "failed_group_count": execution_result["sessions_failed"],
+            "details_returned": False,
+        }
+
+    return {
+        "status": status,
+        "will_run": bool(should_execute),
+        "real_read_enabled": False,
+        "real_read_enabled_after": False,
+        "error_code": error_code,
+        "reason_code": reason_code,
+        "message": message,
+        "scope": {
+            "scope_mode": "configurable_window",
+            "preset": "last_30_days"
+            if window_summary["effective_lookback_days"] == 30
+            else "custom_window",
+            "one_time_expanded_trial": True,
+            "multi_group": True,
+            "lookback_days": window_summary["effective_lookback_days"],
+            "enabled_whitelist_count": len(enabled_whitelist),
+            "requested_group_count": requested_group_count,
+            "selected_group_count": selected_group_count,
+            "test_wechat_account_confirmed": True,
+            "groups_returned": False,
+            "session_names_returned": False,
+            "no_external_send": True,
+            "no_auto_reply": True,
+            "no_formal_write": True,
+            "no_auto_schedule": True,
+            "authorization_marker_present": True,
+            **window_summary,
+        },
+        "limits": limits_summary,
+        "execution": {
+            "entry_opened": bool(should_execute),
+            "will_execute_wx_history": bool(should_execute),
+            "will_execute_wx_search": False,
+            "will_execute_wx_export": False,
+            "will_execute_wx_new_messages": False,
+            "no_real_read_executed": not bool(should_execute),
+            "requires_runtime_authorization": True,
+            "one_time_authorization_present": bool(should_execute),
+            "real_read_enabled_after": False,
+        },
+        "execution_summary": execution_result
+        or {
+            "status": "not_executed",
+            "error_code": "real_trial_execution_entry_not_opened",
+            "sessions_total": selected_group_count,
+            "sessions_success": 0,
+            "sessions_failed": 0,
+            "raw_messages_seen": 0,
+            "raw_messages_inserted": 0,
+            "raw_messages_duplicated": 0,
+            "candidate_items_created": 0,
+            "candidate_items_updated": 0,
+        },
+        "failure_summary": failure_summary,
+    }
+
+
+def real_trial_run_plan(
+    config: AppConfig,
+    payload: dict[str, Any],
+    conn: sqlite3.Connection | None = None,
+    executor: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    if normalized_real_trial_scope_mode(payload) == "configurable_window":
+        return expanded_real_trial_run_plan(
+            config,
+            payload,
+            conn=conn,
+            executor=executor,
+        )
+
     confirmed = bool(payload.get("confirmed", False))
-    limit = clamp_int(payload.get("limit"), minimum=1, maximum=50, default=50)
+    limit = clamp_int(
+        payload.get("limit"),
+        minimum=1,
+        maximum=LEGACY_REAL_TRIAL_MAX_LIMIT,
+        default=LEGACY_REAL_TRIAL_MAX_LIMIT,
+    )
     preset = clean_text(payload.get("preset"))
     start_at = clean_text(payload.get("start_at"))
     end_at = clean_text(payload.get("end_at"))
@@ -5073,7 +5919,7 @@ def real_trial_run_plan(config: AppConfig, payload: dict[str, Any]) -> dict[str,
             "error_code": "real_trial_limit_invalid",
             "message": "真实试读条数必须是数字。",
         }
-    if requested_limit > 50:
+    if requested_limit > LEGACY_REAL_TRIAL_MAX_LIMIT:
         return {
             "status": "blocked",
             "will_run": False,
@@ -5090,18 +5936,29 @@ def real_trial_run_plan(config: AppConfig, payload: dict[str, Any]) -> dict[str,
     return {
         "status": "dry_run_ready",
         "will_run": False,
+        "real_read_enabled": False,
         "error_code": "real_trial_run_not_executed_in_this_task",
         "message": "安全检查通过；本轮开发只提供安全壳，未执行真实读取。",
         "scope": {
+            "scope_mode": "legacy_recent50",
             "enabled_whitelist_count": 1,
             "limit": limit,
             "preset": preset,
             "start_at": start_at,
             "end_at": end_at,
             "lookback_hours": lookback_raw,
+            "groups_returned": False,
+            "session_names_returned": False,
             "no_external_send": True,
             "no_auto_reply": True,
             "no_formal_write": True,
+        },
+        "failure_summary": {
+            "status": "not_executed",
+            "error_code": "real_trial_run_not_executed_in_this_task",
+            "error_count": 0,
+            "failed_group_count": 0,
+            "details_returned": False,
         },
     }
 
@@ -5117,10 +5974,29 @@ def write_config_center_yaml(config: AppConfig) -> None:
             "fixture_dir": config.wx_cli.fixture_dir,
             "real_read_enabled": False,
             "real_allowed_session": config.wx_cli.real_allowed_session,
-            "real_lookback_hours": min(max(1, int(config.wx_cli.real_lookback_hours)), 2),
-            "real_limit": min(max(1, int(config.wx_cli.real_limit)), 50),
+            "real_lookback_hours": min(
+                max(1, int(config.wx_cli.real_lookback_hours)),
+                LEGACY_REAL_TRIAL_MAX_LOOKBACK_HOURS,
+            ),
+            "real_limit": min(
+                max(1, int(config.wx_cli.real_limit)),
+                LEGACY_REAL_TRIAL_MAX_LIMIT,
+            ),
             "real_start_at": config.wx_cli.real_start_at,
             "real_end_at": config.wx_cli.real_end_at,
+            "expanded_real_lookback_days": expanded_real_trial_caps(config)[
+                "max_allowed_lookback_days"
+            ],
+            "expanded_real_max_groups": expanded_real_trial_caps(config)["max_groups"],
+            "expanded_real_max_total_messages": expanded_real_trial_caps(config)[
+                "max_total_messages"
+            ],
+            "expanded_real_max_messages_per_group": expanded_real_trial_caps(config)[
+                "max_messages_per_group"
+            ],
+            "expanded_real_batch_limit": expanded_real_trial_caps(config)[
+                "batch_limit"
+            ],
         },
         "collector": {
             "interval_minutes": config.collector.interval_minutes,
@@ -5213,6 +6089,15 @@ def clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
     except (TypeError, ValueError):
         number = default
     return min(max(number, minimum), maximum)
+
+
+def clamp_float(value: Any, minimum: float, maximum: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    clamped = min(max(number, minimum), maximum)
+    return int(clamped) if float(clamped).is_integer() else clamped
 
 
 def parse_json_list(value: Any) -> list[str]:

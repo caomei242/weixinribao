@@ -13,7 +13,11 @@ from wechat_feedback_app.config import (
     SessionConfig,
     WxCliConfig,
 )
-from wechat_feedback_app.routes import safe_config_payload, safe_status_payload
+from wechat_feedback_app.routes import (
+    safe_config_payload,
+    safe_status_payload,
+    safe_wx_cli_public_payload,
+)
 
 
 class RealConnectionRedactionTest(unittest.TestCase):
@@ -77,6 +81,27 @@ class RealConnectionRedactionTest(unittest.TestCase):
         self.assertIn("renderConfigCenter", app_js)
         self.assertIn("/api/config-center", app_js)
         self.assertNotIn("renderConfigSummary", app_js)
+
+    def test_wx_cli_public_payload_does_not_return_binary_paths(self):
+        payload = safe_wx_cli_public_payload(
+            {
+                "status": "missing_binary",
+                "error_code": "missing_binary",
+                "message": "找不到 wx-cli 二进制：/private/wx-cli/bin/wx",
+                "binary_path": "/private/wx-cli/bin/wx",
+                "configured_binary": "/private/wx-cli/bin/wx",
+                "binary_configured": "true",
+                "is_executable": "false",
+                "session_count": "0",
+            }
+        )
+
+        text = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("/private/", text)
+        self.assertNotIn('"binary_path":', text)
+        self.assertNotIn('"configured_binary":', text)
+        self.assertTrue(payload["binary_configured"])
+        self.assertFalse(payload["binary_path_returned"])
 
 
 if __name__ == "__main__":

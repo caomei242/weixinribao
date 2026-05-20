@@ -34,6 +34,11 @@ class WxCliConfig:
     real_limit: int = 50
     real_start_at: str = ""
     real_end_at: str = ""
+    expanded_real_lookback_days: float = 30
+    expanded_real_max_groups: int = 20
+    expanded_real_max_total_messages: int = 5000
+    expanded_real_max_messages_per_group: int = 500
+    expanded_real_batch_limit: int = 1
 
 
 @dataclass
@@ -200,6 +205,33 @@ def load_config(path: Path | str | None = None, root: Path | None = None) -> App
     )
     config.wx_cli.real_end_at = str(
         wx_cli.get("real_end_at", config.wx_cli.real_end_at)
+    )
+    config.wx_cli.expanded_real_lookback_days = float(
+        wx_cli.get(
+            "expanded_real_lookback_days",
+            config.wx_cli.expanded_real_lookback_days,
+        )
+    )
+    config.wx_cli.expanded_real_max_groups = int(
+        wx_cli.get("expanded_real_max_groups", config.wx_cli.expanded_real_max_groups)
+    )
+    config.wx_cli.expanded_real_max_total_messages = int(
+        wx_cli.get(
+            "expanded_real_max_total_messages",
+            config.wx_cli.expanded_real_max_total_messages,
+        )
+    )
+    config.wx_cli.expanded_real_max_messages_per_group = int(
+        wx_cli.get(
+            "expanded_real_max_messages_per_group",
+            config.wx_cli.expanded_real_max_messages_per_group,
+        )
+    )
+    config.wx_cli.expanded_real_batch_limit = int(
+        wx_cli.get(
+            "expanded_real_batch_limit",
+            config.wx_cli.expanded_real_batch_limit,
+        )
     )
 
     collector = data.get("collector", {})

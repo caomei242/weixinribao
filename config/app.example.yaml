@@ -16,6 +16,11 @@ wx_cli:
   real_limit: 50
   real_start_at: ""
   real_end_at: ""
+  expanded_real_lookback_days: 30
+  expanded_real_max_groups: 20
+  expanded_real_max_total_messages: 5000
+  expanded_real_max_messages_per_group: 500
+  expanded_real_batch_limit: 1
 
 collector:
   interval_minutes: 60

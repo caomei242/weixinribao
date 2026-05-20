@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from .config import AppConfig, internal_aliases, session_by_external_id
 from .db import seed_config
 from .extractor import content_hash, dedupe_key_for_message, extract_candidate
-from .wx_cli_adapter import WxCliUnavailable, fetch_messages
+from .wx_cli_adapter import NormalizedMessage, WxCliUnavailable, fetch_messages
 
 
 @dataclass
@@ -38,7 +38,7 @@ def collect_messages(config: AppConfig, conn: sqlite3.Connection) -> CollectionR
     run_id = _start_run(conn, config.wx_cli.mode, started_at)
 
     try:
-        fetched = [message.as_dict() for message in fetch_messages(config)]
+        fetched = fetch_messages(config)
     except WxCliUnavailable as exc:
         _finish_run(
             conn,
@@ -63,6 +63,30 @@ def collect_messages(config: AppConfig, conn: sqlite3.Connection) -> CollectionR
             error_message=exc.message,
         )
 
+    return collect_normalized_messages(
+        config,
+        conn,
+        fetched,
+        mode=config.wx_cli.mode,
+        run_id=run_id,
+    )
+
+
+def collect_normalized_messages(
+    config: AppConfig,
+    conn: sqlite3.Connection,
+    messages: list[NormalizedMessage | dict],
+    *,
+    mode: str | None = None,
+    run_id: int | None = None,
+) -> CollectionResult:
+    seed_config(conn, config)
+    if run_id is None:
+        run_id = _start_run(conn, mode or config.wx_cli.mode, now_iso())
+    fetched = [
+        message.as_dict() if isinstance(message, NormalizedMessage) else dict(message)
+        for message in messages
+    ]
     sessions = session_by_external_id(config)
     aliases = internal_aliases(config)
     inserted = 0
@@ -158,7 +182,7 @@ def collect_messages(config: AppConfig, conn: sqlite3.Connection) -> CollectionR
     conn.commit()
     return CollectionResult(
         run_id=run_id,
-        mode=config.wx_cli.mode,
+        mode=mode or config.wx_cli.mode,
         status="success",
         sessions_total=len([s for s in config.sessions if s.enabled and s.is_whitelisted]),
         sessions_success=len(sessions_seen),
