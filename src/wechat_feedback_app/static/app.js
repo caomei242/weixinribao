@@ -32,9 +32,12 @@ const state = {
   peopleAliases: [],
   editingPeopleIndex: null,
   editingPersonId: "",
+  peopleSuggestionTimer: null,
   generatingDailyReport: false,
   dailyGenerationStatus: "",
   dailyGenerationFeedback: "",
+  dailyCenter: null,
+  dailyCenterError: "",
   activePage: "daily",
   transferTask: "internal_sync",
 };
@@ -659,7 +662,18 @@ async function refreshDailyControl() {
   const controlDate = document.querySelector("#filterDate").value || today;
   const data = await api(`/api/daily-control?control_date=${encodeURIComponent(controlDate)}`);
   state.dailyControl = data;
+  await refreshDailyCenterProductState(controlDate);
   renderDailyControl(data);
+}
+
+async function refreshDailyCenterProductState(controlDate) {
+  try {
+    state.dailyCenter = await api(`/api/daily-center?control_date=${encodeURIComponent(controlDate)}`);
+    state.dailyCenterError = "";
+  } catch (_error) {
+    state.dailyCenter = null;
+    state.dailyCenterError = "daily_center_unavailable";
+  }
 }
 
 function renderDailyControl(data) {
@@ -717,11 +731,74 @@ function enabledDailyMonitorGroups() {
 
 function dailyCenterCounts() {
   const top = state.dailyControl?.top_status || {};
+  const summary = state.dailyCenter?.summary || {};
+  const unfinishedFollowups = Number(top.pending_count || 0);
+  const historicalUnfollowed = Number(summary.historical_unfollowed_count ?? top.historical_unfollowed_count ?? unfinishedFollowups);
   return {
-    monitorGroups: enabledDailyMonitorGroups().length,
-    newIssues: Number(top.candidate_count || 0),
-    pendingFollowups: Number(top.pending_count || 0),
+    monitorGroups: Number(summary.monitor_group_count ?? enabledDailyMonitorGroups().length),
+    newIssues: Number(summary.new_issue_count ?? top.candidate_count ?? 0),
+    unfinishedFollowups,
+    historicalUnfollowed,
+    pendingFollowups: unfinishedFollowups,
   };
+}
+
+function dailyGenerationStatusLabel() {
+  if (state.generatingDailyReport || state.dailyGenerationStatus === "running") return "生成中";
+  if (state.dailyGenerationStatus === "failed") return "生成失败";
+  if (state.dailyGenerationStatus === "success") return "已刷新";
+  const status = state.dailyCenter?.report?.status_label || state.dailyCenter?.summary?.report_status_label || "";
+  return status || "待生成";
+}
+
+function renderDailyWorkbenchQueue(counts, hasGenerated, settlementStatus, groupGap) {
+  const container = document.querySelector("#dailyWorkbenchQueue");
+  const status = document.querySelector("#dailyWorkbenchStatus");
+  if (!container || !status) return;
+  const generationStatus = dailyGenerationStatusLabel();
+  const rows = [
+    {
+      label: "未完成跟进事项",
+      value: `${counts.unfinishedFollowups} 条`,
+      hint: counts.unfinishedFollowups ? "先处理候选收件箱里的待确认事项。" : "当前没有新的待确认事项。",
+      page: "candidates",
+      tone: counts.unfinishedFollowups ? "warn" : "ok",
+    },
+    {
+      label: "历史未跟进",
+      value: `${counts.historicalUnfollowed} 条`,
+      hint: counts.historicalUnfollowed ? "优先收口跨日遗留，避免日报继续滚动堆积。" : "暂无历史遗留需要单独收口。",
+      page: "candidates",
+      tone: counts.historicalUnfollowed ? "warn" : "ok",
+    },
+    {
+      label: "配置减负",
+      value: groupGap ? `${groupGap} 项待补` : "已顺手",
+      hint: groupGap ? "补齐监控群和我方人员配置，后续日报会少填字段。" : "监控群和身份配置暂无明显缺口。",
+      page: groupGap ? "group-management" : "people",
+      tone: groupGap ? "warn" : "ok",
+    },
+    {
+      label: "日报生成反馈",
+      value: generationStatus,
+      hint: hasGenerated ? `全文已可见，沉淀状态：${settlementStatus}。` : "点击生成后会立即显示进度，旧日报保留到新版完成。",
+      page: "daily",
+      tone: hasGenerated ? "ok" : "warn",
+    },
+  ];
+  status.textContent = rows.some((row) => row.tone === "warn") ? "需处理" : "顺畅";
+  container.innerHTML = rows.map((row) => `
+    <article class="workbench-row ${escapeAttr(row.tone)}">
+      <div>
+        <strong>${escapeHtml(row.label)}</strong>
+        <small>${escapeHtml(row.hint)}</small>
+      </div>
+      <div class="workbench-row-action">
+        <b>${escapeHtml(row.value)}</b>
+        <button type="button" data-jump-page="${escapeAttr(row.page)}">${row.page === "daily" ? "查看" : "去处理"}</button>
+      </div>
+    </article>
+  `).join("");
 }
 
 function renderDailyReportCenter() {
@@ -736,18 +813,22 @@ function renderDailyReportCenter() {
   const settlementStatus = currentSettlementStatus(date);
   document.querySelector("#dailyCenterDate").textContent = date;
   document.querySelector("#dailyCenterLine").textContent = hasGenerated
-    ? `日报已生成，当前还有 ${counts.pendingFollowups} 条未收口事项。`
+    ? `日报已生成，未完成跟进 ${counts.unfinishedFollowups} 条，历史未跟进 ${counts.historicalUnfollowed} 条。`
     : "日报还未生成。下一步：先生成/刷新日报，再确认是否沉淀。";
   const groupGap = Math.max(0, (state.monitorGroups || []).length - counts.monitorGroups);
-  const priorityTitle = counts.pendingFollowups
-    ? `先收口 ${counts.pendingFollowups} 条待确认`
+  const priorityTitle = counts.unfinishedFollowups
+    ? `先收口 ${counts.unfinishedFollowups} 条未完成跟进`
     : counts.newIssues
       ? `先处理 ${counts.newIssues} 条新发现`
-      : hasGenerated
-        ? "今天先确认日报沉淀"
-        : "先生成今天日报";
+      : counts.historicalUnfollowed
+        ? `回看 ${counts.historicalUnfollowed} 条历史未跟进`
+        : hasGenerated
+          ? "今天先确认日报沉淀"
+          : "先生成今天日报";
   const priorityParts = [
     counts.newIssues ? `候选 ${counts.newIssues} 条` : "暂无新候选",
+    counts.unfinishedFollowups ? `未完成 ${counts.unfinishedFollowups} 条` : "未完成跟进清零",
+    counts.historicalUnfollowed ? `历史未跟进 ${counts.historicalUnfollowed} 条` : "历史未跟进清零",
     counts.monitorGroups ? `日报监控群 ${counts.monitorGroups} 个` : "还没有已纳入日报的监控群",
     groupGap ? `有 ${groupGap} 个监控群配置待确认` : "监控群配置暂无明显缺口",
   ];
@@ -759,7 +840,7 @@ function renderDailyReportCenter() {
     ["沉淀状态", settlementStatus, settlementStatus === "已确认沉淀" ? "已人工确认" : "全文底部可确认"],
     ["监控群数", counts.monitorGroups, "启用监控并纳入日报"],
     ["新发现问题", counts.newIssues, "今天候选事项"],
-    ["历史未跟进", counts.pendingFollowups, "仍需人工收口"],
+    ["历史未跟进", counts.historicalUnfollowed, "仍需人工收口"],
   ].map(([label, value, hint]) => `
     <article class="daily-center-card">
       <span>${escapeHtml(label)}</span>
@@ -781,6 +862,7 @@ function renderDailyReportCenter() {
       : `状态：未生成｜候选：${top.candidate_count || 0}｜下一步：生成/刷新日报`;
   document.querySelector("#confirmDailySettlementBtn").disabled = !(hasGenerated && hasReportText);
   document.querySelector("#markDailyReviewBtn").disabled = !(hasGenerated && hasReportText);
+  renderDailyWorkbenchQueue(counts, hasGenerated, settlementStatus, groupGap);
   renderWindowsReadiness();
   renderDailySettlementRows();
 }
@@ -806,7 +888,7 @@ function renderDailySettlementRows() {
     const reportStatus = isCurrent ? (hasGenerated ? "已生成" : "未生成") : "待查看";
     const groupCount = isCurrent ? counts.monitorGroups : "-";
     const newIssues = isCurrent ? counts.newIssues : "-";
-    const pending = isCurrent ? counts.pendingFollowups : "-";
+    const pending = isCurrent ? counts.historicalUnfollowed : "-";
     return `
       <article class="settlement-row">
         <div>
@@ -1471,6 +1553,11 @@ document.querySelector("#dailyFocusPanel").addEventListener("click", (event) => 
   if (!button) return;
   setWorkspacePage(button.dataset.jumpPage);
 });
+document.querySelector("#dailyWorkbenchQueue").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-jump-page]");
+  if (!button) return;
+  setWorkspacePage(button.dataset.jumpPage);
+});
 
 document.querySelector("#dailyControlBtn").addEventListener("click", () => {
   setWorkspacePage("draft");
@@ -1669,6 +1756,8 @@ document.querySelector("#addPeoplePagePersonBtn").addEventListener("click", asyn
 document.querySelector("#savePeoplePageBtn").addEventListener("click", savePeoplePage);
 document.querySelector("#peopleMatchByWxidBtn").addEventListener("click", () => matchPeopleFromInput("wxid"));
 document.querySelector("#peopleMatchByNameBtn").addEventListener("click", () => matchPeopleFromInput("display_name"));
+document.querySelector("#peopleLookupWxid").addEventListener("input", () => schedulePeopleSuggestion("wxid"));
+document.querySelector("#peopleLookupDisplayName").addEventListener("input", () => schedulePeopleSuggestion("display_name"));
 document.querySelector("#peopleUseRecentSenderBtn").addEventListener("click", useRecentSenderForPeople);
 document.querySelector("#peopleAddAliasBtn").addEventListener("click", () => {
   addPeopleAliases(splitAliasInput(document.querySelector("#peopleAliasPasteInput").value));
@@ -2000,6 +2089,46 @@ function optionValuesFromGroups(field) {
       .filter(Boolean)
   );
   return Array.from(values);
+}
+
+function normalizeFieldOption(option) {
+  if (Array.isArray(option)) return String(option[1] || option[0] || "").trim();
+  if (typeof option === "object" && option) {
+    return String(option.label || option.name || option.value || option.title || "").trim();
+  }
+  return String(option || "").trim();
+}
+
+function fieldOptionValues(keys, fallback = [], groupField = "") {
+  const values = new Set();
+  const fieldOptions = state.monitorGroupFieldOptions || {};
+  keys.forEach((key) => {
+    const raw = fieldOptions[key];
+    if (!Array.isArray(raw)) return;
+    raw.map(normalizeFieldOption).filter(Boolean).forEach((value) => values.add(value));
+  });
+  fallback.map(normalizeFieldOption).filter(Boolean).forEach((value) => values.add(value));
+  if (groupField) optionValuesFromGroups(groupField).forEach((value) => values.add(value));
+  return Array.from(values);
+}
+
+function renderMonitorGroupOptionStatus(group) {
+  const node = document.querySelector("#monitorGroupOptionStatus");
+  if (!node) return;
+  const customerCount = Number(state.customerOptions?.count || state.customerOptions?.options?.length || 0);
+  const groupTypeCount = fieldOptionValues(["group_types", "group_type_options"], monitorGroupOptions.groupTypes, "group_type").length;
+  const moduleCount = fieldOptionValues(["modules", "module_options"], monitorGroupOptions.modules, "module_name").length;
+  const stageCount = fieldOptionValues(["customer_stages", "customer_stage_options"], monitorGroupOptions.stages, "customer_stage").length;
+  const selectedRoles = [
+    group?.owner_names?.length ? `负责人 ${group.owner_names.length} 人` : "",
+    group?.common_contacts?.length ? `联系人 ${group.common_contacts.length} 人` : "",
+    group?.internal_people?.length ? `我方人员 ${group.internal_people.length} 人` : "",
+  ].filter(Boolean).join("｜") || "尚未分配成员角色";
+  node.innerHTML = `
+    <strong>配置减负</strong>
+    <span>客户选项 ${escapeHtml(customerCount)} 项｜群类型 ${escapeHtml(groupTypeCount)} 项｜业务模块 ${escapeHtml(moduleCount)} 项｜客户阶段 ${escapeHtml(stageCount)} 项</span>
+    <small>字段优先使用后端选项 / 建议；负责人、联系人和我方人员从统一成员池分配。${escapeHtml(selectedRoles)}</small>
+  `;
 }
 
 function normalizeCustomerOption(option) {
@@ -2768,11 +2897,10 @@ function renderMonitorGroupEditor() {
   document.querySelector("#monitorGroupCompleteness").textContent = completeness.label;
   document.querySelector("#monitorGroupDisplayName").value = group.display_name || "";
   renderCustomerSelect(group);
-  setOptions(document.querySelector("#monitorGroupType"), monitorGroupOptions.groupTypes, group.group_type);
-  setOptions(document.querySelector("#monitorGroupModule"), [
-    ...new Set([...monitorGroupOptions.modules, ...optionValuesFromGroups("module_name")]),
-  ], group.module_name);
-  setOptions(document.querySelector("#monitorGroupStage"), monitorGroupOptions.stages, group.customer_stage);
+  renderMonitorGroupOptionStatus(group);
+  setOptions(document.querySelector("#monitorGroupType"), fieldOptionValues(["group_types", "group_type_options"], monitorGroupOptions.groupTypes, "group_type"), group.group_type);
+  setOptions(document.querySelector("#monitorGroupModule"), fieldOptionValues(["modules", "module_options"], monitorGroupOptions.modules, "module_name"), group.module_name);
+  setOptions(document.querySelector("#monitorGroupStage"), fieldOptionValues(["customer_stages", "customer_stage_options"], monitorGroupOptions.stages, "customer_stage"), group.customer_stage);
   const memberOptions = memberOptionsForGroup(group);
   const memberCount = memberOptions.count || memberOptions.options.length;
   const rosterReady = memberOptions.rosterReady;
@@ -2838,8 +2966,8 @@ function renderMonitorGroupEditor() {
   }
   syncStatus.textContent = statusParts.join(" ");
   renderMemberPool(group, memberOptions);
-  setOptions(document.querySelector("#monitorGroupTrialRange"), monitorGroupOptions.trialRanges, group.trial_range || "recent50", { allowEmpty: false });
-  setOptions(document.querySelector("#monitorGroupVerifyStatus"), monitorGroupOptions.verifyStatuses, group.verification_status || "待验证", { allowEmpty: false });
+  setOptions(document.querySelector("#monitorGroupTrialRange"), fieldOptionValues(["trial_scopes", "trial_ranges"], monitorGroupOptions.trialRanges), group.trial_range || "recent50", { allowEmpty: false });
+  setOptions(document.querySelector("#monitorGroupVerifyStatus"), fieldOptionValues(["verification_statuses", "verify_statuses"], monitorGroupOptions.verifyStatuses), group.verification_status || "待验证", { allowEmpty: false });
   document.querySelector("#monitorGroupDailyMonitor").checked = Boolean(group.daily_monitor);
   document.querySelector("#monitorGroupIncludeDaily").checked = Boolean(group.include_in_daily);
   document.querySelector("#monitorGroupReplyNotes").value = group.reply_notes || "";
@@ -3536,12 +3664,36 @@ function matchExistingPerson(input) {
   );
 }
 
-async function matchPeopleFromInput(type) {
+function peopleLookupRaw(type) {
+  return type === "wxid"
+    ? document.querySelector("#peopleLookupWxid").value.trim()
+    : document.querySelector("#peopleLookupDisplayName").value.trim();
+}
+
+function schedulePeopleSuggestion(type) {
+  clearTimeout(state.peopleSuggestionTimer);
+  const raw = peopleLookupRaw(type);
+  if (!raw) {
+    setPeopleMatchResult("未找到", "请选择一种方式开始识别。", peopleImpactText);
+    return;
+  }
+  if (raw.length < 2 && type !== "wxid") {
+    setPeopleMatchResult("可能是", "继续输入后会自动查找建议。", "不会触发真实消息读取。");
+    return;
+  }
+  setPeopleMatchResult("可能是", "正在准备自动补齐建议。", "输入停顿后会查询我方人员建议接口。");
+  state.peopleSuggestionTimer = setTimeout(() => {
+    matchPeopleFromInput(type, { auto: true });
+  }, 550);
+}
+
+async function matchPeopleFromInput(type, { auto = false } = {}) {
+  clearTimeout(state.peopleSuggestionTimer);
   const raw = type === "wxid"
     ? document.querySelector("#peopleLookupWxid").value.trim()
     : document.querySelector("#peopleLookupDisplayName").value.trim();
   if (!raw) {
-    setPeopleMatchResult("未找到", "请先输入微信号或微信显示名。");
+    if (!auto) setPeopleMatchResult("未找到", "请先输入微信号或微信显示名。");
     return;
   }
   setPeopleMatchResult("可能是", "正在从我方人员接口查找建议。", "只读取身份建议和 count/status，不触发真实消息读取。");

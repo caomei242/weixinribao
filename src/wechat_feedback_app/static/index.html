@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>微信反馈日报中心</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260520-archive-delete-feedback" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260520-productized-workbench" />
   </head>
   <body>
     <header class="topbar">
@@ -121,6 +121,13 @@
             </section>
 
             <aside class="daily-side-panel">
+              <section class="daily-side-card daily-workbench-card">
+                <div class="panel-head">
+                  <h3>待处理工作台</h3>
+                  <span id="dailyWorkbenchStatus" class="status-tag">载入中</span>
+                </div>
+                <div id="dailyWorkbenchQueue" class="workbench-queue" aria-live="polite"></div>
+              </section>
               <section class="daily-side-card">
                 <div class="panel-head">
                   <h3>日报沉淀中心</h3>
@@ -335,6 +342,7 @@
               </div>
               <div class="group-form-grid">
                 <label class="wide">监控群名称<input id="monitorGroupDisplayName" /></label>
+                <div id="monitorGroupOptionStatus" class="config-relief-status wide">正在读取后端选项和识别建议。</div>
                 <label>客户名称<select id="monitorGroupCustomer"></select><small id="monitorGroupCustomerSourceStatus" class="field-hint customer-source-status">客户来源：待加载</small><small id="monitorGroupCustomerHint" class="field-hint">填写监控群名称后，会尝试识别客户。</small><button id="acceptCustomerSuggestionBtn" type="button" class="suggestion-adopt-btn hidden">采用建议客户</button></label>
                 <label>群类型<select id="monitorGroupType"></select></label>
                 <label>业务模块<select id="monitorGroupModule"></select></label>
@@ -723,6 +731,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260520-archive-delete-feedback"></script>
+    <script src="/static/app.js?v=20260520-productized-workbench"></script>
   </body>
 </html>

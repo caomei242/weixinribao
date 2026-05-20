@@ -1060,6 +1060,21 @@ dialog {
   margin-top: 6px;
 }
 
+.config-relief-status {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #d9e7e2;
+  border-radius: 8px;
+  background: #f6fbf8;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.config-relief-status strong {
+  color: var(--ink);
+}
+
 .suggestion-adopt-btn {
   margin-top: 8px;
   width: fit-content;
@@ -1980,7 +1995,7 @@ body {
 
 .daily-side-panel {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 12px;
   min-height: 0;
 }
@@ -1995,6 +2010,51 @@ body {
   display: grid;
   gap: 8px;
   margin-top: 10px;
+}
+
+.workbench-queue {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.workbench-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.workbench-row.ok {
+  border-color: #cfe5da;
+  background: #f6fbf8;
+}
+
+.workbench-row.warn {
+  border-color: #efd4a9;
+  background: #fff8ec;
+}
+
+.workbench-row strong,
+.workbench-row small,
+.workbench-row b {
+  display: block;
+}
+
+.workbench-row small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.workbench-row-action {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  white-space: nowrap;
 }
 
 .settlement-row {
@@ -2278,6 +2338,15 @@ body[data-active-page="candidates"] .inspector-column {
   .daily-focus-actions {
     min-width: 0;
     justify-content: flex-start;
+  }
+
+  .workbench-row {
+    grid-template-columns: 1fr;
+  }
+
+  .workbench-row-action {
+    justify-items: start;
+    white-space: normal;
   }
 
   .daily-report-layout,

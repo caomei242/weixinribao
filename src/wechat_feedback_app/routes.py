@@ -677,6 +677,7 @@ def daily_center_payload(
     report_body = render_daily_center_report(control_date, candidates, historical_items)
     has_report = bool(report_body.strip())
     has_draft = bool(latest_draft)
+    drafted_ids = latest_draft_item_ids(conn, control_date)
     monitor_count = daily_center_monitor_group_count(config)
     new_issue_count = len(candidates)
     historical_count = len(historical_items)
@@ -684,17 +685,46 @@ def daily_center_payload(
     settlement_status_label = (
         "已沉淀" if has_draft else ("待沉淀" if has_report else "暂无可沉淀")
     )
+    today_top_followups = daily_followup_items_payload(
+        candidates[:5], drafted_ids, "today_top_followups"
+    )
+    unfinished_followups = daily_followup_items_payload(
+        [
+            item
+            for item in candidates
+            if candidate_home_status_label(item, drafted_ids) in {"待确认", "已确认跟进"}
+        ],
+        drafted_ids,
+        "unfinished_followups",
+    )
+    historical_unfinished = daily_followup_items_payload(
+        historical_items, drafted_ids, "historical_unfinished"
+    )
+    generation_status = daily_generation_status_payload(config, conn, control_date)
     return {
         "status": "ok",
         "page_title": "日报中心",
         "control_date": control_date,
+        "source": {
+            "label": "本地候选与本地草稿",
+            "new_issue_count": new_issue_count,
+            "unfinished_followup_count": len(unfinished_followups),
+            "historical_unfinished_count": len(historical_unfinished),
+            "monitor_group_count": monitor_count,
+            "formal_write_enabled": False,
+        },
         "summary": {
             "report_status_label": report_status_label,
             "settlement_status_label": settlement_status_label,
             "monitor_group_count": monitor_count,
             "new_issue_count": new_issue_count,
             "historical_unfollowed_count": historical_count,
+            "unfinished_followup_count": len(unfinished_followups),
+            "historical_unfinished_count": len(historical_unfinished),
         },
+        "today_top_followups": today_top_followups,
+        "unfinished_followups": unfinished_followups,
+        "historical_unfinished": historical_unfinished,
         "today_focus": daily_center_today_focus_payload(
             control_date,
             candidates,
@@ -727,11 +757,17 @@ def daily_center_payload(
             "status_label": report_status_label,
             "settlement_status_label": settlement_status_label,
             "body_markdown": report_body,
+            "report_full_text": report_body,
+            "report_human_text": report_body,
+            "source_label": "本地候选与本地草稿",
             "empty_state_label": (
                 "" if has_report else "当前还没有可展示日报；可先生成本地机器初稿。"
             ),
             "body_source_label": "本地候选生成",
         },
+        "report_full_text": report_body,
+        "report_human_text": report_body,
+        "generation_status": generation_status,
         "actions": daily_center_actions(has_report, has_draft),
         "settlement_center": daily_settlement_center_payload(config, conn),
         "candidate_destinations": candidate_resolution_status_payload(
@@ -745,6 +781,37 @@ def daily_center_payload(
             "no_external_send": True,
         },
     }
+
+
+def daily_followup_items_payload(
+    items: list[dict[str, Any]], drafted_ids: set[int], source: str
+) -> list[dict[str, Any]]:
+    source_label = {
+        "today_top_followups": "今天最要跟进",
+        "unfinished_followups": "未完成跟进事项",
+        "historical_unfinished": "历史未跟进",
+    }.get(source, "跟进事项")
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        label = candidate_home_status_label(item, drafted_ids)
+        rows.append(
+            {
+                "item_id": int(item.get("id") or 0),
+                "display_id": redact_visible_text(item.get("item_code")),
+                "summary_safe": redact_visible_text(
+                    item.get("summary") or item.get("title") or ""
+                ),
+                "human_status": label,
+                "home_status_label": label,
+                "action_label": candidate_home_action_label(label),
+                "risk_label": human_candidate_risk_label(item),
+                "source": source,
+                "source_label": source_label,
+                "customer_label": redact_visible_text(item.get("customer_name") or "未标客户"),
+                "module_label": redact_visible_text(item.get("module_name") or "未标模块"),
+            }
+        )
+    return rows
 
 
 def daily_settlement_center_payload(
@@ -2299,6 +2366,7 @@ def monitor_groups_payload(config: AppConfig) -> dict[str, Any]:
     groups = [monitor_group_public_payload(session) for session in config.sessions]
     customer_data = customer_options_with_source_payload(config)
     customer_options = customer_data["options"]
+    field_options = monitor_group_field_options(config)
     return {
         "status": "ok",
         "title": "监控群",
@@ -2313,6 +2381,15 @@ def monitor_groups_payload(config: AppConfig) -> dict[str, Any]:
         "customer_source_status": customer_data["source_status"],
         "customer_source_error_code": customer_data["source_error_code"],
         "customer_option_sources": customer_data["sources"],
+        "field_options": field_options,
+        "customer_name_options": field_options["customers"],
+        "group_type_options": field_options["group_types"],
+        "customer_stage_options": field_options["customer_stages"],
+        "owner_options": field_options["owners"],
+        "module_options": field_options["modules"],
+        "option_source_summary": monitor_group_option_source_summary(
+            config, customer_data
+        ),
         "customer_match_contract": {
             "input": "group_name",
             "outputs": [
@@ -2335,6 +2412,26 @@ def monitor_groups_payload(config: AppConfig) -> dict[str, Any]:
                 "available": True,
                 "requires_confirmation": True,
             },
+        },
+        "save_contract": {
+            "payload_fields": [
+                "group_name",
+                "customer_name",
+                "customer_id",
+                "group_type",
+                "customer_stage",
+                "owner_names",
+                "common_contacts",
+                "internal_people",
+            ],
+            "readback_fields": [
+                "group_id",
+                "customer_name",
+                "customer_id",
+                "group_type",
+                "customer_stage",
+                "owner_label",
+            ],
         },
         "safety": {
             "save_triggers_collection": False,
@@ -2408,13 +2505,19 @@ def monitor_group_detail_payload(
     if session is None:
         return {"status": "not_found", "group": {}}
     member_options = monitor_group_member_options(conn, session, config)
+    field_options = monitor_group_field_options(config)
     return {
         "status": "ok",
         "group": monitor_group_public_payload(
             session, detail=True, member_options=member_options
         ),
-        "field_options": monitor_group_field_options(config),
+        "field_options": field_options,
         "customer_options": customer_options_payload(config),
+        "customer_name_options": field_options["customers"],
+        "group_type_options": field_options["group_types"],
+        "customer_stage_options": field_options["customer_stages"],
+        "owner_options": field_options["owners"],
+        "module_options": field_options["modules"],
         "customer_suggestion": customer_suggestion_payload(
             session.display_name, config
         ),
@@ -2879,26 +2982,62 @@ def monitor_group_public_payload(
     return payload
 
 
-def monitor_group_field_options(config: AppConfig) -> dict[str, list[str]]:
+def monitor_group_field_options(config: AppConfig) -> dict[str, Any]:
+    customer_options = customer_options_payload(config)
+    owners = sorted(
+        {person.person_name for person in config.internal_people if person.person_name}
+        | {session.owner_name for session in config.sessions if session.owner_name}
+        | {
+            owner
+            for session in config.sessions
+            for owner in normalized_owner_names(session)
+        }
+    )
+    common_people = sorted(
+        set(owners)
+        | {
+            contact
+            for session in config.sessions
+            for contact in session.common_contacts
+            if contact
+        }
+        | {
+            person
+            for session in config.sessions
+            for person in session.internal_people
+            if person
+        }
+    )
     return {
         "group_types": ["测试群", "客户群", "渠道群", "内部群"],
-        "customers": [option["customer_name"] for option in customer_options_payload(config)],
+        "customers": [option["customer_name"] for option in customer_options],
+        "customer_options": customer_options,
         "modules": sorted(
             {session.module_name for session in config.sessions if session.module_name}
             | {"售后", "订单", "电商设计", "渠道"}
         ),
         "customer_stages": ["试读验证", "试用期", "交付期", "合作期", "已收口"],
-        "owners": sorted(
-            {person.person_name for person in config.internal_people if person.person_name}
-            | {session.owner_name for session in config.sessions if session.owner_name}
-            | {
-                owner
-                for session in config.sessions
-                for owner in normalized_owner_names(session)
-            }
-        ),
+        "owners": owners,
+        "owner_name_options": owners,
+        "common_contact_options": common_people,
+        "internal_people_options": common_people,
         "trial_scopes": ["最近50条", "指定时间段"],
         "verification_statuses": ["待验证", "已验证"],
+    }
+
+
+def monitor_group_option_source_summary(
+    config: AppConfig, customer_data: dict[str, Any]
+) -> dict[str, Any]:
+    field_options = monitor_group_field_options(config)
+    return {
+        "customer_options_count": len(customer_data.get("options", [])),
+        "customer_source_status": customer_data.get("source_status"),
+        "group_type_count": len(field_options["group_types"]),
+        "customer_stage_count": len(field_options["customer_stages"]),
+        "owner_count": len(field_options["owners"]),
+        "module_count": len(field_options["modules"]),
+        "source_label": "本地配置 / 已保存群档案 / 我方人员库 / 客户系统只读源",
     }
 
 
@@ -3806,7 +3945,25 @@ def internal_people_payload(
             "optional": ["wechat_display_name", "aliases", "role", "modules", "enabled", "notes"],
             "aliases_separator_label": "支持逗号、空格、换行分割",
         },
+        "suggestion_contract": internal_people_suggestion_contract(),
+        "save_readback_contract": {
+            "save_endpoint": "/api/internal-people",
+            "update_endpoint": "/api/internal-people/{person_id}",
+            "disable_endpoint": "/api/internal-people/{person_id}/disable",
+            "readback_endpoint": "/api/internal-people",
+            "readback_fields": [
+                "person_id",
+                "person_name",
+                "wechat_display_name",
+                "aliases",
+                "role",
+                "modules",
+                "enabled",
+                "notes",
+            ],
+        },
         "suggestion_sources": internal_people_source_summary(config, conn),
+        "downstream_status": internal_people_downstream_status(config, conn),
         "safety": internal_people_safety_payload(config),
     }
 
@@ -3854,6 +4011,7 @@ def internal_people_suggestions_payload(
             "query_label": "",
             "count": 0,
             "suggestions": [],
+            "suggestion_contract": internal_people_suggestion_contract(),
             "message": "只拿到内部标识，缺少可显示微信名；请补充微信显示名后再保存。",
             "source_summary": internal_people_source_summary(config, conn),
             "safety": internal_people_safety_payload(config),
@@ -3866,6 +4024,7 @@ def internal_people_suggestions_payload(
             "query_label": "",
             "count": 0,
             "suggestions": [],
+            "suggestion_contract": internal_people_suggestion_contract(),
             "message": "请输入人员姓名或微信显示名。",
             "source_summary": internal_people_source_summary(config, conn),
             "safety": internal_people_safety_payload(config),
@@ -3877,6 +4036,7 @@ def internal_people_suggestions_payload(
         "query_label": redact_visible_text(safe_query),
         "count": len(suggestions),
         "suggestions": suggestions,
+        "suggestion_contract": internal_people_suggestion_contract(),
         "source_summary": internal_people_source_summary(config, conn),
         "safety": internal_people_safety_payload(config),
     }
@@ -3938,6 +4098,16 @@ def save_internal_person_payload(
         "status": "saved",
         "person": internal_person_public_payload(person, config, conn),
         "downstream_status": internal_people_downstream_status(config, conn),
+        "readback_fields": [
+            "person_id",
+            "person_name",
+            "wechat_display_name",
+            "aliases",
+            "role",
+            "modules",
+            "enabled",
+            "notes",
+        ],
         "real_read_enabled": False,
         "save_triggers_collection": False,
         "safety": internal_people_safety_payload(config),
@@ -3991,6 +4161,13 @@ def build_internal_person_suggestions(
             {
                 "person_name": redact_visible_text(query),
                 "wechat_display_name": redact_visible_text(query),
+                "suggested_fields": {
+                    "person_name": redact_visible_text(query),
+                    "wechat_display_name": redact_visible_text(query),
+                    "aliases": [redact_visible_text(query)],
+                    "role": "我方人员",
+                    "modules": [],
+                },
                 "common_names": [redact_visible_text(query)],
                 "aliases": [redact_visible_text(query)],
                 "role": "我方人员",
@@ -4017,6 +4194,13 @@ def internal_person_suggestion_item(
     return {
         "person_name": redact_visible_text(candidate.get("person_name") or display),
         "wechat_display_name": redact_visible_text(display),
+        "suggested_fields": {
+            "person_name": redact_visible_text(candidate.get("person_name") or display),
+            "wechat_display_name": redact_visible_text(display),
+            "aliases": aliases,
+            "role": "我方人员",
+            "modules": [redact_visible_text(module) for module in candidate.get("modules", [])],
+        },
         "common_names": aliases,
         "aliases": aliases,
         "role": "我方人员",
@@ -4027,6 +4211,16 @@ def internal_person_suggestion_item(
         "requires_display_name": False,
         "impact": internal_people_downstream_status(config, conn),
         "source_label": candidate.get("source_label", "本地可见来源"),
+    }
+
+
+def internal_people_suggestion_contract() -> dict[str, Any]:
+    return {
+        "input_fields": ["wechat_id", "wechat_display_name", "display_name", "name", "query"],
+        "source_label": "本地人员库 / 最近发送人 / 监控群 roster 或成员池",
+        "confidence_values": ["已匹配", "可能是", "未找到"],
+        "requires_display_name_when_internal_id_only": True,
+        "returns_raw_identifier": False,
     }
 
 
@@ -4319,7 +4513,28 @@ def messages_v1_payload(
     if selected != "all":
         session = find_monitor_group(config, selected)
         if session is None:
-            return {"status": "not_found", "groups": groups, "messages": [], "count": 0}
+            return {
+                "status": "not_found",
+                "selected_group_id": selected,
+                "group_filter_label": "单群消息",
+                "group_count": len(groups),
+                "groups_count": len(groups),
+                "message_count": 0,
+                "count": 0,
+                "groups": groups,
+                "messages": [],
+                "empty_state_label": "未找到这个监控群，请先从群列表选择。",
+                "group_first_contract": {
+                    "requires_group_selection": True,
+                    "single_group_no_fallback": True,
+                    "all_groups_value": "all",
+                },
+                "safety": {
+                    "content_returned": False,
+                    "raw_payload_returned": False,
+                    "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
+                },
+            }
         session_external = session.external_id
     query = """
         select rm.id, rm.sender_display_name, rm.sender_role, rm.sent_at,
@@ -4367,6 +4582,22 @@ def messages_v1_payload(
         "selected_group_id": selected,
         "group_filter_label": "全部监控群" if selected == "all" else "单群消息",
         "count": len(messages),
+        "message_count": len(messages),
+        "group_count": len(groups),
+        "groups_count": len(groups),
+        "group_status": "all_groups" if selected == "all" else "single_group",
+        "single_group_no_fallback": selected != "all",
+        "empty_state_label": (
+            "当前群暂无本地消息；不会回退展示全部群。"
+            if selected != "all" and not messages
+            else ""
+        ),
+        "group_first_contract": {
+            "requires_group_selection": True,
+            "single_group_no_fallback": True,
+            "all_groups_value": "all",
+            "filter_param": "group_id",
+        },
         "groups": groups,
         "messages": messages,
         "safety": {
@@ -4398,6 +4629,7 @@ def message_group_options(
             "group_id": "all",
             "group_name": "全部监控群",
             "message_count": sum(counts.values()),
+            "status_label": "全部群",
             "enabled": True,
         }
     ]
@@ -4408,6 +4640,8 @@ def message_group_options(
                 "group_name": redact_visible_text(session.display_name),
                 "customer_label": redact_visible_text(session.customer_name or "未标客户"),
                 "enabled": bool(session.enabled),
+                "archived": bool(getattr(session, "archived", False)),
+                "status_label": monitor_group_status_label(session),
                 "message_count": counts.get(session.external_id, 0),
             }
         )
