@@ -2587,45 +2587,105 @@ def local_group_display_meta_from_payload(payload: Any) -> dict[str, str] | None
     return None
 
 
-def local_group_display_meta_from_db(
+def detected_group_external_id_from_raw(value: Any) -> str:
+    raw = clean_text(value)
+    if not raw:
+        return ""
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+    return f"detected-wechat-group-{digest}"
+
+
+def local_group_display_source_rows(
     conn: sqlite3.Connection | None, external_id: str
-) -> dict[str, str] | None:
+) -> list[sqlite3.Row]:
     if conn is None or not external_id:
-        return None
+        return []
     try:
-        rows = conn.execute(
+        exact_rows = conn.execute(
             """
-            select display_name
-            from sessions
-            where external_id = ?
-            order by updated_at desc, id desc
-            limit 5
+            select s.external_id, s.display_name, rm.raw_payload_json
+            from sessions s
+            left join raw_messages rm on rm.session_id = s.id
+            where s.external_id = ?
+            order by rm.id desc, s.updated_at desc, s.id desc
+            limit 50
             """,
             (external_id,),
         ).fetchall()
     except sqlite3.Error:
-        rows = []
+        exact_rows = []
+    rows = list(exact_rows)
+    if not external_id.startswith("detected-wechat-group-"):
+        return rows
+    try:
+        candidate_rows = conn.execute(
+            """
+            select s.external_id, s.display_name, rm.raw_payload_json
+            from sessions s
+            left join raw_messages rm on rm.session_id = s.id
+            order by rm.id desc, s.updated_at desc, s.id desc
+            limit 500
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        candidate_rows = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        seen.add(
+            (
+                clean_text(row["external_id"]),
+                clean_text(row["display_name"]),
+                clean_text(row["raw_payload_json"]),
+            )
+        )
+    for row in candidate_rows:
+        raw_payload: Any = {}
+        try:
+            raw_payload = json.loads(row["raw_payload_json"] or "{}")
+        except (TypeError, ValueError):
+            raw_payload = {}
+        raw_identifier = session_probe_text(
+            raw_payload if isinstance(raw_payload, dict) else {},
+            "id",
+            "external_id",
+            "username",
+            "room_id",
+            "chat_id",
+            "conversation_id",
+            "session_id",
+        )
+        identifiers = [
+            clean_text(row["external_id"]),
+            raw_identifier,
+        ]
+        if external_id not in {
+            detected_group_external_id_from_raw(identifier)
+            for identifier in identifiers
+            if clean_text(identifier)
+        }:
+            continue
+        key = (
+            clean_text(row["external_id"]),
+            clean_text(row["display_name"]),
+            clean_text(row["raw_payload_json"]),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+    return rows
+
+
+def local_group_display_meta_from_db(
+    conn: sqlite3.Connection | None, external_id: str
+) -> dict[str, str] | None:
+    rows = local_group_display_source_rows(conn, external_id)
     for row in rows:
         meta = local_group_display_meta(
             row["display_name"], source="local_session_metadata"
         )
         if meta["status"] == "resolved":
             return meta
-    try:
-        raw_rows = conn.execute(
-            """
-            select rm.raw_payload_json
-            from raw_messages rm
-            join sessions s on s.id = rm.session_id
-            where s.external_id = ?
-            order by rm.id desc
-            limit 20
-            """,
-            (external_id,),
-        ).fetchall()
-    except sqlite3.Error:
-        raw_rows = []
-    for row in raw_rows:
         try:
             payload = json.loads(row["raw_payload_json"] or "{}")
         except (TypeError, ValueError):
@@ -2671,12 +2731,49 @@ def refresh_monitor_group_display_names_from_local_sources(
     return backfilled
 
 
+def monitor_group_display_name_diagnostic(
+    config: AppConfig, conn: sqlite3.Connection | None
+) -> dict[str, int]:
+    monitor_group_count = len(config.sessions)
+    readable_group_label_count = 0
+    unresolved_group_label_count = 0
+    unresolved_with_readable_source_count = 0
+    unresolved_without_readable_source_count = 0
+    for session in config.sessions:
+        meta = local_group_display_meta(
+            session.display_name,
+            source=clean_text(getattr(session, "display_name_source", ""))
+            or "config_display_name",
+        )
+        if (
+            meta["status"] == "resolved"
+            and clean_text(getattr(session, "display_name_status", "resolved"))
+            != "unresolved"
+        ):
+            readable_group_label_count += 1
+            continue
+        unresolved_group_label_count += 1
+        if local_group_display_meta_from_db(conn, session.external_id) is not None:
+            unresolved_with_readable_source_count += 1
+        else:
+            unresolved_without_readable_source_count += 1
+    return {
+        "monitor_group_count": monitor_group_count,
+        "readable_group_label_count": readable_group_label_count,
+        "unresolved_group_label_count": unresolved_group_label_count,
+        "unresolved_with_readable_source_count": unresolved_with_readable_source_count,
+        "unresolved_without_readable_source_count": unresolved_without_readable_source_count,
+    }
+
+
 def monitor_groups_payload(
     config: AppConfig, conn: sqlite3.Connection | None = None
 ) -> dict[str, Any]:
+    before_diagnostic = monitor_group_display_name_diagnostic(config, conn)
     backfilled_count = refresh_monitor_group_display_names_from_local_sources(
         config, conn
     )
+    after_diagnostic = monitor_group_display_name_diagnostic(config, conn)
     groups = [monitor_group_public_payload(session) for session in config.sessions]
     customer_data = customer_options_with_source_payload(config)
     customer_options = customer_data["options"]
@@ -2689,6 +2786,14 @@ def monitor_groups_payload(
         "archived_count": len([group for group in groups if group["archived"]]),
         "display_name_backfilled_count": backfilled_count,
         "display_name_backfill_status": "updated" if backfilled_count else "not_needed",
+        **after_diagnostic,
+        "display_name_diagnostics": {
+            "before_refresh": before_diagnostic,
+            "after_refresh": after_diagnostic,
+            "backfilled_count": backfilled_count,
+            "diagnostic_scope": "current_monitor_groups",
+            "returns_group_names": False,
+        },
         "daily_center_count": len(
             [group for group in groups if group["counts_in_daily_center"]]
         ),
@@ -5013,9 +5118,11 @@ def messages_v1_payload(
         group_name = group_meta["value"]
         customer_label = local_ui_display_text(row["customer_name"] or "未标客户")
         module_label = local_ui_display_text(row["module_name"] or "未标模块")
-        content_text = local_message_text(row["content_text"])
-        content_preview = local_message_preview(content_text)
-        content_status = "ok" if content_preview else "empty"
+        content_fields = local_message_content_fields(
+            row["content_text"],
+            ref,
+            row["message_type"],
+        )
         messages.append(
             {
                 "message_ref": ref,
@@ -5035,24 +5142,47 @@ def messages_v1_payload(
                 "sender_identity": safe_sender_role(row["sender_role"]),
                 "sender_identity_label": identity_label(row["sender_role"]),
                 "candidate_count": int(row["candidate_count"] or 0),
-                "content_text": content_text,
-                "content_preview": content_preview,
-                "message_text": content_text,
-                "summary": content_preview,
-                "content_text_safe": redact_visible_text(content_text),
-                "content_preview_safe": redact_visible_text(content_preview),
-                "summary_safe": redact_visible_text(content_preview),
-                "content_status": content_status,
-                "content_returned": bool(content_preview),
+                **content_fields,
                 "detail_target": {"group_id": row_group_id, "message_ref": ref},
             }
         )
+    content_quality = messages_content_quality_summary(messages)
     return {
         "status": "ok",
         "selected_group_id": selected,
         "group_filter_label": "全部监控群" if selected == "all" else "单群消息",
         "count": len(messages),
         "message_count": len(messages),
+        "rows_with_content_text": content_quality["rows_with_content_text"],
+        "rows_with_content_preview": content_quality["rows_with_content_preview"],
+        "rows_with_message_text": content_quality["rows_with_message_text"],
+        "rows_with_summary": content_quality["rows_with_summary"],
+        "rows_with_content_returned": content_quality["rows_with_content_returned"],
+        "content_text_human_readable_count": content_quality[
+            "content_text_human_readable_count"
+        ],
+        "content_preview_human_readable_count": content_quality[
+            "content_preview_human_readable_count"
+        ],
+        "message_text_human_readable_count": content_quality[
+            "message_text_human_readable_count"
+        ],
+        "summary_human_readable_count": content_quality[
+            "summary_human_readable_count"
+        ],
+        "summary_message_ref_like_count": content_quality[
+            "summary_message_ref_like_count"
+        ],
+        "content_text_message_ref_like_count": content_quality[
+            "content_text_message_ref_like_count"
+        ],
+        "content_preview_message_ref_like_count": content_quality[
+            "content_preview_message_ref_like_count"
+        ],
+        "empty_or_placeholder_content_count": content_quality[
+            "empty_or_placeholder_content_count"
+        ],
+        "content_quality": content_quality,
         "group_count": len(groups),
         "groups_count": len(groups),
         "group_status": "all_groups" if selected == "all" else "single_group",
@@ -5071,8 +5201,8 @@ def messages_v1_payload(
         "groups": groups,
         "messages": messages,
         "safety": {
-            "content_returned": True,
-            "content_preview_returned": True,
+            "content_returned": bool(content_quality["rows_with_content_returned"]),
+            "content_preview_returned": bool(content_quality["rows_with_content_preview"]),
             "raw_payload_returned": False,
             "local_ui_payload": True,
             "report_safe_payload": False,
@@ -7507,6 +7637,132 @@ def local_message_preview(value: Any, *, max_chars: int = 180) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars].rstrip()}..."
+
+
+def is_message_ref_like_text(value: Any, *, message_ref: str = "") -> bool:
+    text = clean_text(value)
+    if not text:
+        return False
+    lowered = text.lower()
+    if message_ref and lowered == clean_text(message_ref).lower():
+        return True
+    return bool(
+        re.fullmatch(r"m-\d{2,}", lowered)
+        or re.fullmatch(r"(?:msg|message)[-_ ]?(?:ref|id)?[-_ ]?\d{2,}", lowered)
+        or re.fullmatch(r"(?:message_ref|raw_message_id|local_id)[:：]?\s*\S+", lowered)
+    )
+
+
+def is_placeholder_message_text(value: Any, *, message_ref: str = "") -> bool:
+    text = clean_text(value)
+    if not text:
+        return True
+    lowered = text.lower()
+    if is_message_ref_like_text(text, message_ref=message_ref):
+        return True
+    if is_internal_identifier_for_display(text):
+        return True
+    placeholders = {
+        "无正文",
+        "暂无正文",
+        "正文为空",
+        "空消息",
+        "消息正文待解析",
+        "不支持的消息类型",
+        "unsupported",
+        "empty",
+        "none",
+        "null",
+    }
+    return lowered in placeholders or text in placeholders
+
+
+def is_human_readable_message_text(value: Any, *, message_ref: str = "") -> bool:
+    return bool(clean_text(value)) and not is_placeholder_message_text(
+        value, message_ref=message_ref
+    )
+
+
+def local_message_content_fields(
+    content_value: Any, message_ref: str, message_type: Any
+) -> dict[str, Any]:
+    raw_content = local_message_text(content_value)
+    normalized_type = local_ui_display_text(message_type or "text")
+    if is_human_readable_message_text(raw_content, message_ref=message_ref):
+        preview = local_message_preview(raw_content)
+        return {
+            "content_text": raw_content,
+            "content_preview": preview,
+            "message_text": raw_content,
+            "summary": preview,
+            "content_text_safe": redact_visible_text(raw_content),
+            "content_preview_safe": redact_visible_text(preview),
+            "summary_safe": redact_visible_text(preview),
+            "content_status": "ok",
+            "content_status_label": "已返回本地正文",
+            "content_returned": True,
+            "content_empty_label": "",
+        }
+    status = "placeholder_only" if is_message_ref_like_text(raw_content, message_ref=message_ref) else "empty"
+    if normalized_type and normalized_type not in {"text", "文本", "unknown"} and not raw_content:
+        status = "unsupported_message_type"
+    empty_label = {
+        "placeholder_only": "消息正文待解析，当前只有技术定位码",
+        "unsupported_message_type": "该消息类型暂未解析正文",
+        "empty": "该消息暂无正文",
+    }.get(status, "该消息暂无正文")
+    return {
+        "content_text": "",
+        "content_preview": "",
+        "message_text": "",
+        "summary": "",
+        "content_text_safe": "",
+        "content_preview_safe": "",
+        "summary_safe": "",
+        "content_status": status,
+        "content_status_label": empty_label,
+        "content_returned": False,
+        "content_empty_label": empty_label,
+    }
+
+
+def messages_content_quality_summary(messages: list[dict[str, Any]]) -> dict[str, int]:
+    fields = ("content_text", "content_preview", "message_text", "summary")
+    summary = {
+        "message_count": len(messages),
+        "rows_with_content_text": 0,
+        "rows_with_content_preview": 0,
+        "rows_with_message_text": 0,
+        "rows_with_summary": 0,
+        "rows_with_content_returned": 0,
+        "content_text_human_readable_count": 0,
+        "content_preview_human_readable_count": 0,
+        "message_text_human_readable_count": 0,
+        "summary_human_readable_count": 0,
+        "summary_message_ref_like_count": 0,
+        "content_text_message_ref_like_count": 0,
+        "content_preview_message_ref_like_count": 0,
+        "empty_or_placeholder_content_count": 0,
+    }
+    for message in messages:
+        message_ref = clean_text(message.get("message_ref"))
+        has_human = False
+        if bool(message.get("content_returned")):
+            summary["rows_with_content_returned"] += 1
+        for field in fields:
+            value = clean_text(message.get(field))
+            if value:
+                summary[f"rows_with_{field}"] += 1
+            if is_human_readable_message_text(value, message_ref=message_ref):
+                summary[f"{field}_human_readable_count"] += 1
+                has_human = True
+            if field in {"summary", "content_text", "content_preview"} and is_message_ref_like_text(
+                value, message_ref=message_ref
+            ):
+                summary[f"{field}_message_ref_like_count"] += 1
+        if not has_human:
+            summary["empty_or_placeholder_content_count"] += 1
+    return summary
 
 
 def is_internal_identifier_for_display(value: Any) -> bool:

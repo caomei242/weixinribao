@@ -13,6 +13,7 @@ from wechat_feedback_app.routes import (
     config_center_payload,
     daily_center_today_focus_payload,
     daily_followup_items_payload,
+    detected_group_external_id_from_raw,
     internal_people_payload,
     internal_people_suggestions_payload,
     message_group_options,
@@ -98,11 +99,81 @@ class LocalUiDisplayContractTest(unittest.TestCase):
             self.assertFalse(payload["safety"]["raw_payload_returned"])
             self.assertTrue(payload["safety"]["local_ui_payload"])
             self.assertFalse(payload["safety"]["report_safe_payload"])
+            self.assertEqual(payload["content_text_human_readable_count"], 1)
+            self.assertEqual(payload["content_preview_human_readable_count"], 1)
+            self.assertEqual(payload["message_text_human_readable_count"], 1)
+            self.assertEqual(payload["summary_human_readable_count"], 1)
+            self.assertEqual(payload["content_text_message_ref_like_count"], 0)
+            self.assertEqual(payload["content_preview_message_ref_like_count"], 0)
+            self.assertEqual(payload["summary_message_ref_like_count"], 0)
+            self.assertEqual(payload["empty_or_placeholder_content_count"], 0)
 
             report_payload = config_center_payload(config)
             report_text = json.dumps(report_payload, ensure_ascii=False)
             self.assertNotIn("消息正文 13812345678", report_text)
             self.assert_no_forbidden_report_fields(report_payload)
+
+    def test_messages_do_not_use_message_ref_as_content_preview_or_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, conn = self._setup(
+                root,
+                sessions=[SessionConfig("group-a", "本地消息群")],
+            )
+            self._insert_raw_message(
+                conn,
+                "group-a",
+                "本地消息群",
+                content_text="m-0001",
+            )
+
+            groups = message_group_options(config, conn)
+            payload = messages_v1_payload(config, conn, groups[1]["group_id"])
+            message = payload["messages"][0]
+
+            self.assertEqual(message["message_ref"], "m-0001")
+            self.assertEqual(message["content_text"], "")
+            self.assertEqual(message["content_preview"], "")
+            self.assertEqual(message["message_text"], "")
+            self.assertEqual(message["summary"], "")
+            self.assertEqual(message["content_status"], "placeholder_only")
+            self.assertFalse(message["content_returned"])
+            self.assertEqual(payload["rows_with_content_returned"], 0)
+            self.assertEqual(payload["content_text_human_readable_count"], 0)
+            self.assertEqual(payload["content_preview_human_readable_count"], 0)
+            self.assertEqual(payload["message_text_human_readable_count"], 0)
+            self.assertEqual(payload["summary_human_readable_count"], 0)
+            self.assertEqual(payload["summary_message_ref_like_count"], 0)
+            self.assertEqual(payload["content_text_message_ref_like_count"], 0)
+            self.assertEqual(payload["content_preview_message_ref_like_count"], 0)
+            self.assertEqual(payload["empty_or_placeholder_content_count"], 1)
+
+    def test_empty_or_unsupported_message_gets_human_empty_state_not_ref_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, conn = self._setup(
+                root,
+                sessions=[SessionConfig("group-a", "本地消息群")],
+            )
+            self._insert_raw_message(
+                conn,
+                "group-a",
+                "本地消息群",
+                message_type="image",
+                content_text="",
+            )
+
+            groups = message_group_options(config, conn)
+            payload = messages_v1_payload(config, conn, groups[1]["group_id"])
+            message = payload["messages"][0]
+
+            self.assertEqual(message["content_text"], "")
+            self.assertEqual(message["content_preview"], "")
+            self.assertEqual(message["summary"], "")
+            self.assertEqual(message["content_status"], "unsupported_message_type")
+            self.assertIn("消息类型", message["content_empty_label"])
+            self.assertNotEqual(message["summary"], message["message_ref"])
+            self.assertEqual(payload["empty_or_placeholder_content_count"], 1)
 
     def test_internal_chatroom_id_is_not_used_as_group_display_across_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,10 +252,81 @@ class LocalUiDisplayContractTest(unittest.TestCase):
             )
             self.assertEqual(payload["groups"][0]["display_name_status"], "resolved")
             self.assertEqual(payload["display_name_backfilled_count"], 1)
+            self.assertEqual(payload["monitor_group_count"], 1)
+            self.assertEqual(payload["readable_group_label_count"], 1)
+            self.assertEqual(payload["unresolved_group_label_count"], 0)
+            self.assertEqual(payload["unresolved_with_readable_source_count"], 0)
+            self.assertEqual(payload["unresolved_without_readable_source_count"], 0)
+            self.assertEqual(
+                payload["display_name_diagnostics"]["before_refresh"][
+                    "unresolved_with_readable_source_count"
+                ],
+                1,
+            )
             self.assertEqual(detail["group"]["group_name"], "本地元数据可读群 13812345678")
             self.assertEqual(groups[1]["group_name"], "本地元数据可读群 13812345678")
             self.assertEqual(config.sessions[0].display_name_status, "resolved")
             self.assertEqual(config.sessions[0].display_name, "本地元数据可读群 13812345678")
+
+    def test_monitor_groups_display_name_diagnostics_count_current_visible_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            detected_external_id = detected_group_external_id_from_raw(
+                "223456789012345@chatroom"
+            )
+            config, conn = self._setup(
+                root,
+                sessions=[
+                    SessionConfig("resolved-a", "已解析群"),
+                    SessionConfig(
+                        detected_external_id,
+                        "群名待解析",
+                        display_name_status="unresolved",
+                        display_name_reason_code="internal_identifier_only",
+                    ),
+                    SessionConfig(
+                        "missing-source",
+                        "群名待解析",
+                        display_name_status="unresolved",
+                        display_name_reason_code="internal_identifier_only",
+                    ),
+                ],
+            )
+            self._insert_raw_message(
+                conn,
+                "223456789012345@chatroom",
+                "223456789012345@chatroom",
+                raw_payload={
+                    "id": "223456789012345@chatroom",
+                    "chatroom": {"remarkName": "本地二段解析群 13812345678"},
+                },
+            )
+
+            payload = monitor_groups_payload(config, conn)
+
+            self.assertEqual(payload["monitor_group_count"], 3)
+            self.assertEqual(payload["display_name_backfilled_count"], 1)
+            self.assertEqual(payload["readable_group_label_count"], 2)
+            self.assertEqual(payload["unresolved_group_label_count"], 1)
+            self.assertEqual(payload["unresolved_with_readable_source_count"], 0)
+            self.assertEqual(payload["unresolved_without_readable_source_count"], 1)
+            before = payload["display_name_diagnostics"]["before_refresh"]
+            self.assertEqual(before["readable_group_label_count"], 1)
+            self.assertEqual(before["unresolved_group_label_count"], 2)
+            self.assertEqual(before["unresolved_with_readable_source_count"], 1)
+            self.assertEqual(before["unresolved_without_readable_source_count"], 1)
+            resolved = [
+                group
+                for group in payload["groups"]
+                if group["display_name_status"] == "resolved"
+            ]
+            unresolved = [
+                group
+                for group in payload["groups"]
+                if group["display_name_status"] == "unresolved"
+            ]
+            self.assertEqual(len(resolved), 2)
+            self.assertEqual(len(unresolved), 1)
 
     def test_internal_people_main_fields_keep_display_values_with_safe_copies(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -337,6 +479,8 @@ class LocalUiDisplayContractTest(unittest.TestCase):
         external_id: str,
         group_name: str,
         raw_payload: dict[str, object] | None = None,
+        message_type: str = "text",
+        content_text: str = "消息正文 13812345678",
     ) -> None:
         cursor = conn.execute(
             "insert into sessions (external_id, display_name, customer_name, module_name) values (?, ?, ?, ?)",
@@ -358,10 +502,12 @@ class LocalUiDisplayContractTest(unittest.TestCase):
               raw_payload_json, collection_run_id
             )
             values (?, '发送人', 'customer', '2026-05-20T09:02:00+08:00',
-                    'text', '消息正文 13812345678', 'hash-a', 'dedupe-a', ?, ?)
+                    ?, ?, 'hash-a', 'dedupe-a', ?, ?)
             """,
             (
                 session_id,
+                message_type,
+                content_text,
                 json.dumps(raw_payload or {}, ensure_ascii=False),
                 int(run.lastrowid),
             ),

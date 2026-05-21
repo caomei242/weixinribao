@@ -38,6 +38,7 @@
 - 2026-05-20 起，脱敏规则只用于跨线程回报、状态卡、监工回报队列、测试日志、smoke 摘要、README / 文档证据和外部系统，不得把这些脱敏规则直接套到用户本人操作的 Windows 本地页面。
 - Windows 本地操作台、群管理页、消息页和配置页为用户本人确认、删除、归类、排查而服务；已授权的本地 UI 主显示字段必须显示真实可识别信息，例如真实群名、真实客户显示名和负责人显示名。否则用户无法判断要保留或删除哪个群。
 - 如果接口同时服务本地 UI 和回报证据，主显示字段供本地 UI 使用，应保持真实值；如需安全摘要，另加 `safe_*` / `redacted_*` 字段，不得用 `[敏感信息已脱敏]` 覆盖主显示字段。
+- 2026-05-21 起，Windows 本地 UI 验收不得只看字段存在性、`*_exists`、`rows_with_*` 或 `smoke_status=ok`。涉及用户可见主字段时，必须验“当前页面值是否可读”：群管理要统计 `readable_group_label_count`、`unresolved_group_label_count`、`unresolved_with_readable_source_count`；消息明细要统计 `human_readable_count`、`message_ref_like_count`、`empty_or_placeholder_content_count`。如果用户截图仍显示 `群名待解析`、`m-00xx`、内部 ID、脱敏占位或技术定位码，必须暂停通过口径并派最小返工。
 - 状态卡、回报队列、测试审查、监工回报和 Windows smoke 仍只能写 count / status / error_code / 字段存在性 / 布尔结果，不得摘录真实群名、真实消息正文、真实成员、客户名单、wxid/key/salt、DB 路径、IP 或 daemon 原始日志。
 
 ## 客户识别与客户源边界
