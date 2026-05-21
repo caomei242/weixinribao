@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from wechat_feedback_app.collector import collect_normalized_messages
 from wechat_feedback_app.config import AppConfig, SessionConfig, WxCliConfig
@@ -11,6 +12,7 @@ from wechat_feedback_app.db import setup_database
 from wechat_feedback_app.routes import (
     config_center_payload,
     detected_wechat_group_sessions,
+    execute_configurable_real_trial_once,
     monitor_groups_payload,
     persistent_real_read_control_payload,
     real_trial_run_plan,
@@ -19,7 +21,7 @@ from wechat_feedback_app.routes import (
     save_config_center_payload,
     upsert_detected_monitor_groups,
 )
-from wechat_feedback_app.wx_cli_adapter import NormalizedMessage
+from wechat_feedback_app.wx_cli_adapter import NormalizedMessage, WxCliCommandResult
 
 
 def sample_config(
@@ -174,6 +176,18 @@ def internal_id_only_group_probe_payload() -> dict[str, object]:
     }
 
 
+def token_only_group_probe_payload() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "sessions": [
+            {
+                "id": "token-only-room@chatroom",
+                "chat_type": "chatroom",
+            }
+        ],
+    }
+
+
 def assert_no_sensitive_fields(testcase: unittest.TestCase, payload: dict) -> None:
     text = json.dumps(payload, ensure_ascii=False)
     for forbidden in (
@@ -199,6 +213,10 @@ def assert_no_sensitive_fields(testcase: unittest.TestCase, payload: dict) -> No
         "single-showroom",
         "single-workgroup",
         "english-team",
+        "token-only-room",
+        '"history_target":',
+        '"wx_session_token":',
+        '"source_session_id":',
         "single-a",
         "official-a",
         "member_name_options",
@@ -273,6 +291,74 @@ class PersistentRealReadContractTest(unittest.TestCase):
         self.assertFalse(config.wx_cli.real_read_enabled)
         assert_no_sensitive_fields(self, result)
 
+    def test_persistent_history_failure_classification_is_safe_summary_only(self):
+        cases = [
+            ("session not found for selected chat", "session_identifier_mismatch"),
+            ("wx-cli command timed out while reading history", "timeout"),
+            ("database locked or permission denied", "permission_db_connect"),
+            ("history window too large for this request", "window_too_large"),
+            ("unknown flag --since / unexpected argument", "argument_incompatible"),
+            ("history command failed with exit code 99", "unknown_history_failure"),
+        ]
+
+        for raw_error, expected in cases:
+            with self.subTest(expected=expected):
+                config = sample_config(enabled=True)
+
+                def fake_executor(plan: dict) -> dict:
+                    return {
+                        "status": "failed",
+                        "error_code": "real_trial_history_failed",
+                        "sessions_total": plan["selected_group_count"],
+                        "sessions_success": 0,
+                        "sessions_failed": plan["selected_group_count"],
+                        "raw_messages_seen": 0,
+                        "raw_messages_inserted": 0,
+                        "raw_messages_duplicated": 0,
+                        "candidate_items_created": 0,
+                        "candidate_items_updated": 0,
+                        "stderr_preview": raw_error,
+                    }
+
+                result = real_trial_run_plan(
+                    config,
+                    persistent_payload(
+                        group_ids=["group-a"],
+                        include_all_enabled_whitelist=False,
+                        lookback_days=1,
+                        max_total_messages=20,
+                        max_messages_per_group=20,
+                    ),
+                    executor=fake_executor,
+                )
+
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["error_code"], "real_trial_history_failed")
+                self.assertEqual(
+                    result["execution_summary"]["history_failure_classification"],
+                    expected,
+                )
+                self.assertEqual(
+                    result["failure_summary"]["history_failure_classification"],
+                    expected,
+                )
+                self.assertEqual(
+                    result["failure_summary"]["history_failure_category_counts"][expected],
+                    1,
+                )
+                self.assertTrue(result["failure_summary"]["safe_classification_returned"])
+                self.assertFalse(result["failure_summary"]["details_returned"])
+                self.assertFalse(result["execution_summary"]["history_failure_details_returned"])
+                self.assertEqual(result["history_diagnostic"]["route"], "/api/real-trial/run")
+                self.assertTrue(result["history_diagnostic"]["same_execution_path"])
+                self.assertEqual(result["history_diagnostic"]["suggested_lookback_days"], 1)
+                self.assertTrue(result["history_diagnostic"]["single_group_supported"])
+                payload_text = json.dumps(result, ensure_ascii=False)
+                self.assertNotIn(raw_error, payload_text)
+                self.assertNotIn("stderr_preview", payload_text)
+                self.assertFalse(config.wx_cli.real_read_enabled)
+                assert_no_sensitive_fields(self, result)
+
     def test_persistent_all_wechat_groups_scope_uses_probe_groups_and_fake_executor(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = sample_config(Path(tmp), enabled=True)
@@ -312,6 +398,111 @@ class PersistentRealReadContractTest(unittest.TestCase):
             self.assertFalse(config.wx_cli.real_read_enabled)
             saved = (Path(tmp) / "config" / "app.yaml").read_text(encoding="utf-8")
             self.assertIn("detected-wechat-group-", saved)
+            assert_no_sensitive_fields(self, result)
+
+    def test_persistent_all_wechat_groups_history_uses_underlying_probe_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = sample_config(Path(tmp), enabled=True)
+            conn = setup_database(config)
+            recorded_args: list[list[str]] = []
+
+            def fake_run(_config: AppConfig, args: list[str]) -> WxCliCommandResult:
+                recorded_args.append(args)
+                return WxCliCommandResult(
+                    status="ok",
+                    message="ok",
+                    command="history",
+                    parsed={"messages": []},
+                )
+
+            with patch(
+                "wechat_feedback_app.routes.test_connection",
+                return_value={"status": "ok"},
+            ), patch(
+                "wechat_feedback_app.routes.run_wx_cli_json",
+                side_effect=fake_run,
+            ), patch(
+                "wechat_feedback_app.routes.collect_normalized_messages",
+                return_value={
+                    "status": "success",
+                    "error_code": "",
+                    "raw_messages_seen": 0,
+                    "raw_messages_inserted": 0,
+                    "raw_messages_duplicated": 0,
+                    "candidate_items_created": 0,
+                    "candidate_items_updated": 0,
+                },
+            ):
+                result = real_trial_run_plan(
+                    config,
+                    all_wechat_groups_payload(
+                        lookback_days=1,
+                        max_total_messages=20,
+                        max_messages_per_group=20,
+                    ),
+                    conn=conn,
+                    session_probe=lambda _config: token_only_group_probe_payload(),
+                )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["scope"]["selected_group_count"], 1)
+            self.assertEqual(len(recorded_args), 1)
+            self.assertEqual(recorded_args[0][0], "history")
+            self.assertEqual(recorded_args[0][1], "token-only-room@chatroom")
+            self.assertFalse(recorded_args[0][1].startswith("detected-wechat-group-"))
+            detected = [
+                session
+                for session in config.sessions
+                if session.external_id.startswith("detected-wechat-group-")
+            ][0]
+            self.assertEqual(detected.history_target, "token-only-room@chatroom")
+            self.assertEqual(detected.wx_session_token, "token-only-room@chatroom")
+            self.assertEqual(detected.source_session_id, "token-only-room@chatroom")
+            result_text = json.dumps(result, ensure_ascii=False)
+            self.assertNotIn("token-only-room", result_text)
+            assert_no_sensitive_fields(self, result)
+
+    def test_detected_hash_target_is_blocked_before_calling_wx_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = sample_config(Path(tmp), enabled=True)
+            conn = setup_database(config)
+            session = SessionConfig(
+                "detected-wechat-group-abcdef123456",
+                "群名待解析",
+                display_name_status="unresolved",
+                display_name_reason_code="internal_identifier_only",
+            )
+
+            with patch(
+                "wechat_feedback_app.routes.test_connection",
+                return_value={"status": "ok"},
+            ), patch("wechat_feedback_app.routes.run_wx_cli_json") as run_mock:
+                result = execute_configurable_real_trial_once(
+                    config,
+                    conn,
+                    [session],
+                    {
+                        "effective_lookback_days": 1,
+                        "window_start": "2026-05-20T00:00:00+00:00",
+                    },
+                    {"requested_messages_per_group": 20},
+                    collection_mode="persistent_real_read",
+                )
+
+            run_mock.assert_not_called()
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["error_code"], "real_trial_history_failed")
+            self.assertEqual(result["invalid_history_target_count"], 1)
+            self.assertEqual(
+                result["history_failure_classification"],
+                "session_identifier_mismatch",
+            )
+            self.assertEqual(
+                result["history_failure_category_counts"][
+                    "session_identifier_mismatch"
+                ],
+                1,
+            )
             assert_no_sensitive_fields(self, result)
 
     def test_persistent_all_wechat_groups_excludes_non_group_sessions(self):

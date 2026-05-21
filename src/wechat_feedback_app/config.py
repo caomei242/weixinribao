@@ -83,6 +83,9 @@ class SessionConfig:
     display_name_status: str = "resolved"
     display_name_source: str = ""
     display_name_reason_code: str = ""
+    history_target: str = ""
+    wx_session_token: str = ""
+    source_session_id: str = ""
 
 
 @dataclass
@@ -328,6 +331,9 @@ def load_config(path: Path | str | None = None, root: Path | None = None) -> App
                 display_name_reason_code=str(
                     item.get("display_name_reason_code", "")
                 ),
+                history_target=str(item.get("history_target", "")),
+                wx_session_token=str(item.get("wx_session_token", "")),
+                source_session_id=str(item.get("source_session_id", "")),
             )
             for item in data.get("sessions", [])
             if item.get("external_id")

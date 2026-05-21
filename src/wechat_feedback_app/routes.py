@@ -96,6 +96,18 @@ READABLE_SESSION_NAME_KEYS = (
     "remarkName",
     "remark_name",
 )
+HISTORY_TARGET_KEYS = (
+    "history_target",
+    "wx_session_token",
+    "source_session_id",
+    "id",
+    "external_id",
+    "username",
+    "room_id",
+    "chat_id",
+    "conversation_id",
+    "session_id",
+)
 SESSION_NAME_METADATA_KEYS = (
     "contact",
     "contacts",
@@ -795,7 +807,7 @@ def daily_center_payload(
         "已沉淀" if has_draft else ("待沉淀" if has_report else "暂无可沉淀")
     )
     today_top_followups = daily_followup_items_payload(
-        candidates[:5], drafted_ids, "today_top_followups"
+        candidates[:5], drafted_ids, "today_top_followups", config
     )
     unfinished_followups = daily_followup_items_payload(
         [
@@ -805,9 +817,10 @@ def daily_center_payload(
         ],
         drafted_ids,
         "unfinished_followups",
+        config,
     )
     historical_unfinished = daily_followup_items_payload(
-        historical_items, drafted_ids, "historical_unfinished"
+        historical_items, drafted_ids, "historical_unfinished", config
     )
     generation_status = daily_generation_status_payload(config, conn, control_date)
     return {
@@ -841,6 +854,7 @@ def daily_center_payload(
             monitor_count,
             latest_run(conn),
             has_report,
+            config,
         ),
         "cards": [
             {
@@ -893,7 +907,10 @@ def daily_center_payload(
 
 
 def daily_followup_items_payload(
-    items: list[dict[str, Any]], drafted_ids: set[int], source: str
+    items: list[dict[str, Any]],
+    drafted_ids: set[int],
+    source: str,
+    config: AppConfig | None = None,
 ) -> list[dict[str, Any]]:
     source_label = {
         "today_top_followups": "今天最要跟进",
@@ -906,22 +923,7 @@ def daily_followup_items_payload(
         summary_text = local_ui_display_text(item.get("summary") or item.get("title") or "")
         customer_label = local_ui_display_text(item.get("customer_name") or "未标客户")
         module_label = local_ui_display_text(item.get("module_name") or "未标模块")
-        raw_group_label = (
-            item.get("group_name")
-            or item.get("session_display_name")
-            or item.get("session_name")
-        )
-        group_fields = (
-            local_group_display_fields(raw_group_label, source="candidate_item")
-            if clean_text(raw_group_label)
-            else {
-                "group_label": "",
-                "group_label_safe": "",
-                "group_label_status": "not_provided",
-                "group_label_reason_code": "",
-                "group_label_source_error_code": "",
-            }
-        )
+        group_fields = candidate_item_group_display_fields(item, config)
         rows.append(
             {
                 "item_id": int(item.get("id") or 0),
@@ -1002,6 +1004,7 @@ def daily_center_today_focus_payload(
     monitor_count: int,
     latest_collection: dict[str, Any],
     has_report: bool,
+    config: AppConfig | None = None,
 ) -> dict[str, Any]:
     priority_items = list(candidates[:3])
     if len(priority_items) < 3:
@@ -1039,26 +1042,7 @@ def daily_center_today_focus_payload(
                 "summary_safe": redact_visible_text(
                     item.get("summary") or item.get("title") or ""
                 ),
-                **(
-                    local_group_display_fields(
-                        item.get("group_name")
-                        or item.get("session_display_name")
-                        or item.get("session_name"),
-                        source="candidate_item",
-                    )
-                    if clean_text(
-                        item.get("group_name")
-                        or item.get("session_display_name")
-                        or item.get("session_name")
-                    )
-                    else {
-                        "group_label": "",
-                        "group_label_safe": "",
-                        "group_label_status": "not_provided",
-                        "group_label_reason_code": "",
-                        "group_label_source_error_code": "",
-                    }
-                ),
+                **candidate_item_group_display_fields(item, config),
                 "home_status_label": candidate_home_status_label(item, set()),
                 "action_label": candidate_home_action_label(
                     candidate_home_status_label(item, set())
@@ -1398,6 +1382,69 @@ def candidate_home_action_label(label: str) -> str:
         "已写入日报": "查看日报",
         "已收口": "查看记录",
     }.get(label, "查看")
+
+
+def monitor_group_display_meta_from_config(
+    config: AppConfig | None, identifier: Any
+) -> dict[str, str] | None:
+    if config is None:
+        return None
+    token = clean_text(identifier)
+    if not token:
+        return None
+    token_candidates = [token, detected_group_external_id_from_raw(token)]
+    for candidate in token_candidates:
+        session = find_monitor_group_by_external_id(config, candidate)
+        if session is None:
+            continue
+        meta = local_group_display_meta(
+            session.display_name,
+            source=clean_text(getattr(session, "display_name_source", ""))
+            or "monitor_group_config",
+        )
+        if (
+            meta["status"] == "resolved"
+            and clean_text(getattr(session, "display_name_status", "resolved"))
+            != "unresolved"
+        ):
+            return meta
+    return None
+
+
+def candidate_item_group_display_fields(
+    item: dict[str, Any] | dict[str, object], config: AppConfig | None = None
+) -> dict[str, str]:
+    raw_group_label = (
+        item.get("group_name")
+        or item.get("session_display_name")
+        or item.get("session_name")
+    )
+    identifiers = [
+        item.get("monitor_group_external_id"),
+        item.get("group_external_id"),
+        item.get("session_external_id"),
+        item.get("external_id"),
+        raw_group_label,
+    ]
+    for identifier in identifiers:
+        meta = monitor_group_display_meta_from_config(config, identifier)
+        if meta is not None:
+            return {
+                "group_label": meta["value"],
+                "group_label_safe": redact_visible_text(meta["value"]),
+                "group_label_status": meta["status"],
+                "group_label_reason_code": meta["reason_code"],
+                "group_label_source_error_code": meta["source_error_code"],
+            }
+    if clean_text(raw_group_label):
+        return local_group_display_fields(raw_group_label, source="candidate_item")
+    return {
+        "group_label": "",
+        "group_label_safe": "",
+        "group_label_status": "not_provided",
+        "group_label_reason_code": "",
+        "group_label_source_error_code": "",
+    }
 
 
 def human_status_payload(
@@ -2329,7 +2376,10 @@ def candidate_action_label(source: str, status: str, in_draft: bool) -> str:
 
 
 def build_candidate_inbox_items(
-    items: list[dict[str, object]], source: str, drafted_item_ids: set[int]
+    items: list[dict[str, object]],
+    source: str,
+    drafted_item_ids: set[int],
+    config: AppConfig | None = None,
 ) -> list[dict[str, object]]:
     human_items: list[dict[str, object]] = []
     for item in items:
@@ -2338,22 +2388,7 @@ def build_candidate_inbox_items(
         in_draft = item_id in drafted_item_ids
         title = local_ui_display_text(item.get("title"))
         summary = local_ui_display_text(item.get("summary") or item.get("title") or "")
-        raw_group_label = (
-            item.get("group_name")
-            or item.get("session_display_name")
-            or item.get("session_name")
-        )
-        group_fields = (
-            local_group_display_fields(raw_group_label, source="candidate_item")
-            if clean_text(raw_group_label)
-            else {
-                "group_label": "",
-                "group_label_safe": "",
-                "group_label_status": "not_provided",
-                "group_label_reason_code": "",
-                "group_label_source_error_code": "",
-            }
-        )
+        group_fields = candidate_item_group_display_fields(item, config)
         human_items.append(
             {
                 "id": item_id,
@@ -2412,7 +2447,7 @@ def candidate_inbox_payload(
 ) -> dict[str, object]:
     source, raw_items = resolve_candidate_pool_source(config, conn, control_date)
     human_items = build_candidate_inbox_items(
-        raw_items, source, latest_draft_item_ids(conn, control_date)
+        raw_items, source, latest_draft_item_ids(conn, control_date), config
     )
     return {
         "title": "候选收件箱",
@@ -2593,6 +2628,10 @@ def detected_group_external_id_from_raw(value: Any) -> str:
         return ""
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
     return f"detected-wechat-group-{digest}"
+
+
+def detected_group_history_target(item: dict[str, Any]) -> str:
+    return session_probe_text(item, *HISTORY_TARGET_KEYS)
 
 
 def local_group_display_source_rows(
@@ -5595,6 +5634,15 @@ def save_config_center_payload(
 ) -> dict[str, Any]:
     sessions_payload = payload.get("sessions")
     if isinstance(sessions_payload, list):
+        previous_sessions = {clean_text(session.external_id): session for session in config.sessions}
+
+        def preserved_session_value(item: dict[str, Any], key: str) -> str:
+            explicit = clean_text(item.get(key))
+            if explicit:
+                return explicit
+            previous = previous_sessions.get(clean_text(item.get("external_id")))
+            return clean_text(getattr(previous, key, "")) if previous is not None else ""
+
         config.sessions = [
             SessionConfig(
                 external_id=clean_text(item.get("external_id")),
@@ -5630,6 +5678,9 @@ def save_config_center_payload(
                     item.get("display_name_reason_code")
                 )
                 or local_group_display_meta(item.get("display_name"))["reason_code"],
+                history_target=preserved_session_value(item, "history_target"),
+                wx_session_token=preserved_session_value(item, "wx_session_token"),
+                source_session_id=preserved_session_value(item, "source_session_id"),
             )
             for item in sessions_payload
             if isinstance(item, dict)
@@ -6184,13 +6235,240 @@ def configurable_history_args(
 ) -> list[str]:
     return [
         "history",
-        session.display_name or session.external_id,
+        session_history_target(session) or session.external_id,
         "--since",
         history_since_text(window_summary),
         "-n",
         str(limit),
         "--json",
     ]
+
+
+def session_history_target(session: SessionConfig) -> str:
+    for attr in ("history_target", "wx_session_token", "source_session_id"):
+        value = clean_text(getattr(session, attr, ""))
+        if value:
+            return value
+    display_meta = local_group_display_meta(
+        session.display_name,
+        source=clean_text(getattr(session, "display_name_source", ""))
+        or "config_display_name",
+    )
+    if (
+        display_meta["status"] == "resolved"
+        and clean_text(getattr(session, "display_name_status", "resolved"))
+        != "unresolved"
+    ):
+        return display_meta["value"]
+    external_id = clean_text(session.external_id)
+    return external_id
+
+
+def invalid_history_target(value: Any) -> bool:
+    target = clean_text(value)
+    if not target:
+        return True
+    return bool(re.fullmatch(r"(?:detected-wechat-group|local-monitor)-[a-f0-9]{8,}", target))
+
+
+HISTORY_FAILURE_CLASSIFICATIONS = {
+    "session_identifier_mismatch",
+    "timeout",
+    "permission_db_connect",
+    "window_too_large",
+    "argument_incompatible",
+    "unknown_history_failure",
+}
+
+
+def normalize_history_failure_classification(value: Any) -> str:
+    text = clean_text(value).lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "session_not_found": "session_identifier_mismatch",
+        "session_mismatch": "session_identifier_mismatch",
+        "chat_not_found": "session_identifier_mismatch",
+        "not_found": "session_identifier_mismatch",
+        "permission": "permission_db_connect",
+        "permission_denied": "permission_db_connect",
+        "db": "permission_db_connect",
+        "database": "permission_db_connect",
+        "connect": "permission_db_connect",
+        "connection": "permission_db_connect",
+        "wechat_not_running": "permission_db_connect",
+        "missing_binary": "permission_db_connect",
+        "not_initialized": "permission_db_connect",
+        "parse_error": "unknown_history_failure",
+    }
+    normalized = aliases.get(text, text)
+    return (
+        normalized
+        if normalized in HISTORY_FAILURE_CLASSIFICATIONS
+        else "unknown_history_failure"
+    )
+
+
+def classify_history_failure_text(value: Any) -> str:
+    text = clean_text(value).lower()
+    if not text:
+        return "unknown_history_failure"
+    if any(token in text for token in ("timeout", "timed out", "超时")):
+        return "timeout"
+    if any(
+        token in text
+        for token in (
+            "unknown flag",
+            "unknown option",
+            "unexpected argument",
+            "invalid argument",
+            "invalid option",
+            "usage:",
+            "clap",
+            "unrecognized option",
+            "参数",
+        )
+    ):
+        return "argument_incompatible"
+    if any(
+        token in text
+        for token in (
+            "too large",
+            "range too",
+            "window too",
+            "lookback",
+            "since too old",
+            "limit exceeded",
+            "exceeds",
+            "范围过大",
+            "超过",
+        )
+    ):
+        return "window_too_large"
+    if any(
+        token in text
+        for token in (
+            "permission",
+            "denied",
+            "access",
+            "database",
+            "sqlite",
+            "sqlcipher",
+            "db",
+            "connect",
+            "connection",
+            "not initialized",
+            "wechat not running",
+            "not logged in",
+            "login",
+        )
+    ):
+        return "permission_db_connect"
+    if any(
+        token in text
+        for token in (
+            "no such chat",
+            "chat not found",
+            "session not found",
+            "conversation not found",
+            "invalid chat",
+            "invalid session",
+            "chatroom not found",
+            "room not found",
+            "未找到会话",
+            "会话不存在",
+            "群不存在",
+        )
+    ):
+        return "session_identifier_mismatch"
+    return "unknown_history_failure"
+
+
+def classify_history_failure_result(result: Any) -> str:
+    if hasattr(result, "__dict__"):
+        data = dict(result.__dict__)
+    elif isinstance(result, dict):
+        data = dict(result)
+    else:
+        data = {}
+    explicit = clean_text(
+        data.get("history_failure_classification")
+        or data.get("failure_classification")
+        or data.get("failure_category")
+    )
+    if explicit:
+        return normalize_history_failure_classification(explicit)
+    status = clean_text(data.get("status") or data.get("error_code"))
+    if status:
+        normalized = normalize_history_failure_classification(status)
+        if normalized != "unknown_history_failure":
+            return normalized
+    return classify_history_failure_text(
+        "\n".join(
+            clean_text(data.get(key))
+            for key in ("message", "stderr_preview", "stdout_preview", "error_message")
+        )
+    )
+
+
+def normalize_history_failure_counts(
+    value: Any, *, fallback_failed_count: int = 0, fallback_classification: str = ""
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if isinstance(value, dict):
+        iterable = value.items()
+    elif isinstance(value, list):
+        pairs: list[tuple[Any, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            category = (
+                item.get("classification")
+                or item.get("category")
+                or item.get("error_classification")
+            )
+            count = item.get("count", item.get("failed_count", 0))
+            pairs.append((category, count))
+        iterable = pairs
+    else:
+        iterable = []
+    for key, raw_count in iterable:
+        category = normalize_history_failure_classification(key)
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            counts[category] = counts.get(category, 0) + count
+    if not counts and fallback_failed_count > 0:
+        category = normalize_history_failure_classification(
+            fallback_classification or "unknown_history_failure"
+        )
+        counts[category] = fallback_failed_count
+    return counts
+
+
+def primary_history_failure_classification(counts: dict[str, int], fallback: str = "") -> str:
+    if counts:
+        return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+    if fallback:
+        return normalize_history_failure_classification(fallback)
+    return ""
+
+
+def persistent_history_diagnostic_contract(caps: dict[str, int]) -> dict[str, Any]:
+    return {
+        "route": "/api/real-trial/run",
+        "authorization_mode": "persistent",
+        "trigger": "manual",
+        "same_execution_path": True,
+        "single_group_supported": True,
+        "suggested_group_count": 1,
+        "suggested_lookback_days": 1,
+        "suggested_max_messages_per_group": min(20, int(caps["max_messages_per_group"])),
+        "suggested_max_total_messages": min(20, int(caps["max_total_messages"])),
+        "groups_returned": False,
+        "session_names_returned": False,
+        "details_returned": False,
+    }
 
 
 def execution_summary_from_result(result: Any) -> dict[str, Any]:
@@ -6202,17 +6480,43 @@ def execution_summary_from_result(result: Any) -> dict[str, Any]:
         data = {}
     status = clean_text(data.get("status")) or "failed"
     error_code = clean_text(data.get("error_code"))
+    sessions_failed = int(data.get("sessions_failed") or 0)
+    classification = classify_history_failure_result(data)
+    raw_counts = (
+        data.get("history_failure_category_counts")
+        or data.get("history_failure_counts")
+        or data.get("failure_category_counts")
+    )
+    history_failure_counts = normalize_history_failure_counts(
+        raw_counts,
+        fallback_failed_count=(
+            sessions_failed
+            if error_code in {"real_trial_history_failed", "real_trial_partial_failed"}
+            else 0
+        ),
+        fallback_classification=classification,
+    )
+    primary_classification = primary_history_failure_classification(
+        history_failure_counts,
+        classification
+        if error_code in {"real_trial_history_failed", "real_trial_partial_failed"}
+        else "",
+    )
     return {
         "status": status,
         "error_code": error_code,
         "sessions_total": int(data.get("sessions_total") or 0),
         "sessions_success": int(data.get("sessions_success") or 0),
-        "sessions_failed": int(data.get("sessions_failed") or 0),
+        "sessions_failed": sessions_failed,
         "raw_messages_seen": int(data.get("raw_messages_seen") or 0),
         "raw_messages_inserted": int(data.get("raw_messages_inserted") or 0),
         "raw_messages_duplicated": int(data.get("raw_messages_duplicated") or 0),
         "candidate_items_created": int(data.get("candidate_items_created") or 0),
         "candidate_items_updated": int(data.get("candidate_items_updated") or 0),
+        "history_failure_classification": primary_classification,
+        "history_failure_category_counts": history_failure_counts,
+        "history_failure_categories": sorted(history_failure_counts),
+        "history_failure_details_returned": False,
     }
 
 
@@ -6269,7 +6573,17 @@ def execute_configurable_real_trial_once(
 
     messages = []
     failed = 0
+    history_failure_counts: dict[str, int] = {}
+    invalid_history_target_count = 0
     for session in selected_sessions:
+        history_target = session_history_target(session)
+        if invalid_history_target(history_target):
+            failed += 1
+            invalid_history_target_count += 1
+            history_failure_counts["session_identifier_mismatch"] = (
+                history_failure_counts.get("session_identifier_mismatch", 0) + 1
+            )
+            continue
         result = run_wx_cli_json(
             config,
             configurable_history_args(
@@ -6280,10 +6594,18 @@ def execute_configurable_real_trial_once(
         )
         if result.status != "ok":
             failed += 1
+            classification = classify_history_failure_result(result)
+            history_failure_counts[classification] = (
+                history_failure_counts.get(classification, 0) + 1
+            )
             continue
         messages.extend(map_history_payload(result.parsed, session))
 
     if failed and not messages:
+        primary_classification = primary_history_failure_classification(
+            history_failure_counts,
+            "unknown_history_failure",
+        )
         return {
             "status": "failed",
             "error_code": "real_trial_history_failed",
@@ -6295,6 +6617,11 @@ def execute_configurable_real_trial_once(
             "raw_messages_duplicated": 0,
             "candidate_items_created": 0,
             "candidate_items_updated": 0,
+            "history_failure_classification": primary_classification,
+            "history_failure_category_counts": history_failure_counts,
+            "history_failure_categories": sorted(history_failure_counts),
+            "history_failure_details_returned": False,
+            "invalid_history_target_count": invalid_history_target_count,
         }
 
     collected = collect_normalized_messages(
@@ -6309,6 +6636,15 @@ def execute_configurable_real_trial_once(
     summary["sessions_success"] = max(0, len(selected_sessions) - failed)
     summary["status"] = "partial_failed" if failed else summary["status"]
     summary["error_code"] = "real_trial_partial_failed" if failed else summary["error_code"]
+    if failed:
+        summary["history_failure_classification"] = primary_history_failure_classification(
+            history_failure_counts,
+            "unknown_history_failure",
+        )
+        summary["history_failure_category_counts"] = history_failure_counts
+        summary["history_failure_categories"] = sorted(history_failure_counts)
+        summary["history_failure_details_returned"] = False
+        summary["invalid_history_target_count"] = invalid_history_target_count
     return summary
 
 
@@ -6503,6 +6839,7 @@ def detected_wechat_group_sessions(payload: Any) -> tuple[list[SessionConfig], d
         if external_id in seen:
             continue
         seen.add(external_id)
+        history_target = detected_group_history_target(item)
         display_meta = detected_group_display_meta(item, index)
         selected.append(
             SessionConfig(
@@ -6518,6 +6855,9 @@ def detected_wechat_group_sessions(payload: Any) -> tuple[list[SessionConfig], d
                 display_name_status=display_meta["status"],
                 display_name_source=display_meta["source"],
                 display_name_reason_code=display_meta["reason_code"],
+                history_target=history_target,
+                wx_session_token=history_target,
+                source_session_id=history_target,
             )
         )
     summary = {
@@ -6593,6 +6933,12 @@ def upsert_detected_monitor_groups(config: AppConfig, sessions: list[SessionConf
         existing = by_id.get(detected.external_id) or name_match
         if existing is not None:
             existing_meta = local_group_display_meta(existing.display_name)
+            for attr in ("history_target", "wx_session_token", "source_session_id"):
+                if not clean_text(getattr(existing, attr, "")) and clean_text(
+                    getattr(detected, attr, "")
+                ):
+                    setattr(existing, attr, clean_text(getattr(detected, attr, "")))
+                    updated += 1
             if (
                 existing_meta["status"] == "unresolved"
                 and detected_meta["status"] == "resolved"
@@ -6960,6 +7306,19 @@ def persistent_real_read_run_plan(
         "error_count": 1 if execution_result["error_code"] else 0,
         "failed_group_count": execution_result["sessions_failed"],
         "details_returned": False,
+        "history_failure_classification": execution_result.get(
+            "history_failure_classification", ""
+        ),
+        "history_failure_category_counts": execution_result.get(
+            "history_failure_category_counts", {}
+        ),
+        "history_failure_categories": execution_result.get(
+            "history_failure_categories", []
+        ),
+        "safe_classification_returned": bool(
+            execution_result.get("history_failure_classification")
+            or execution_result.get("history_failure_category_counts")
+        ),
     }
     return {
         "status": execution_result["status"],
@@ -6991,6 +7350,7 @@ def persistent_real_read_run_plan(
             **scope_summary,
         },
         "limits": limits_summary,
+        "history_diagnostic": persistent_history_diagnostic_contract(caps),
         "execution": {
             "entry_opened": True,
             "authorization_mode": "persistent",
@@ -7536,6 +7896,21 @@ def write_config_center_yaml(config: AppConfig) -> None:
                     session,
                     "display_name_reason_code",
                     local_group_display_meta(session.display_name)["reason_code"],
+                ),
+                **(
+                    {"history_target": clean_text(getattr(session, "history_target", ""))}
+                    if clean_text(getattr(session, "history_target", ""))
+                    else {}
+                ),
+                **(
+                    {"wx_session_token": clean_text(getattr(session, "wx_session_token", ""))}
+                    if clean_text(getattr(session, "wx_session_token", ""))
+                    else {}
+                ),
+                **(
+                    {"source_session_id": clean_text(getattr(session, "source_session_id", ""))}
+                    if clean_text(getattr(session, "source_session_id", ""))
+                    else {}
                 ),
                 "customer_name": session.customer_name,
                 "channel_name": session.channel_name,
