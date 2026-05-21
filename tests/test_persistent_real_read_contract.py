@@ -147,6 +147,21 @@ def readable_group_metadata_probe_payload() -> dict[str, object]:
     }
 
 
+def nested_readable_group_metadata_probe_payload() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "sessions": [
+            {
+                "id": "223456789012345@chatroom",
+                "chat_type": "chatroom",
+                "contact": {
+                    "remarkName": "Nested Readable Probe Group",
+                },
+            }
+        ],
+    }
+
+
 def internal_id_only_group_probe_payload() -> dict[str, object]:
     return {
         "status": "ok",
@@ -379,6 +394,39 @@ class PersistentRealReadContractTest(unittest.TestCase):
             self.assertNotIn("@chatroom", json.dumps(public, ensure_ascii=False))
             assert_no_sensitive_fields(self, result)
 
+    def test_persistent_all_wechat_groups_uses_nested_contact_metadata_as_saved_display_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = sample_config(Path(tmp), enabled=True)
+
+            result = real_trial_run_plan(
+                config,
+                all_wechat_groups_payload(),
+                executor=lambda plan: {
+                    "status": "success",
+                    "sessions_total": plan["selected_group_count"],
+                    "sessions_success": plan["selected_group_count"],
+                },
+                session_probe=lambda _config: nested_readable_group_metadata_probe_payload(),
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["scope"]["detected_group_count"], 1)
+            detected = next(
+                session
+                for session in config.sessions
+                if session.display_name == "Nested Readable Probe Group"
+            )
+            self.assertEqual(detected.display_name_status, "resolved")
+            self.assertEqual(detected.display_name_source, "contact.remarkName")
+            public = next(
+                group
+                for group in monitor_groups_payload(config)["groups"]
+                if group["group_name"] == "Nested Readable Probe Group"
+            )
+            self.assertEqual(public["display_name_status"], "resolved")
+            self.assertNotIn("@chatroom", json.dumps(public, ensure_ascii=False))
+            assert_no_sensitive_fields(self, result)
+
     def test_persistent_all_wechat_groups_marks_internal_id_only_display_unresolved(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = sample_config(Path(tmp), enabled=True)
@@ -488,6 +536,31 @@ class PersistentRealReadContractTest(unittest.TestCase):
                 if session.display_name == "Readable Upgrade Group"
             )
             self.assertEqual(upgraded.display_name_status, "resolved")
+
+    def test_same_external_id_unresolved_group_can_upgrade_from_nested_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = sample_config(Path(tmp), enabled=True)
+            unresolved, _summary_unresolved = detected_wechat_group_sessions(
+                {
+                    "status": "ok",
+                    "sessions": [
+                        {"id": "223456789012345@chatroom", "chat_type": "chatroom"}
+                    ],
+                }
+            )
+            resolved, _summary_resolved = detected_wechat_group_sessions(
+                nested_readable_group_metadata_probe_payload()
+            )
+
+            self.assertEqual(upsert_detected_monitor_groups(config, unresolved), 1)
+            self.assertEqual(upsert_detected_monitor_groups(config, resolved), 0)
+            upgraded = next(
+                session
+                for session in config.sessions
+                if session.display_name == "Nested Readable Probe Group"
+            )
+            self.assertEqual(upgraded.display_name_status, "resolved")
+            self.assertEqual(upgraded.display_name_source, "contact.remarkName")
 
     def test_persistent_all_wechat_groups_probe_failure_blocks_before_history(self):
         config = sample_config(enabled=True)

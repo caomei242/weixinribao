@@ -194,7 +194,7 @@ class WindowsP0BackendTest(unittest.TestCase):
             self.assertNotIn("wxid_internal_only", json.dumps(saved, ensure_ascii=False))
             self._assert_no_sensitive(suggestion, root)
 
-    def test_messages_v1_supports_all_and_single_group_without_content(self):
+    def test_messages_v1_supports_all_and_single_group_with_local_ui_content_preview(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config, conn = self._setup(
@@ -216,10 +216,14 @@ class WindowsP0BackendTest(unittest.TestCase):
             self.assertEqual(group_payload["messages"][0]["group_id"], group_a_id)
             self.assertEqual(group_payload["messages"][0]["sender_identity_label"], "我方人员")
             self.assertIn("detail_target", group_payload["messages"][0])
+            self.assertIn("content_preview", group_payload["messages"][0])
+            self.assertIn("content_preview_safe", group_payload["messages"][0])
             text = json.dumps(group_payload, ensure_ascii=False)
             self.assertNotIn("SECRET_BODY", text)
             self.assertNotIn("raw_payload_json", text)
-            self.assertFalse(group_payload["safety"]["content_returned"])
+            self.assertTrue(group_payload["safety"]["content_returned"])
+            self.assertTrue(group_payload["safety"]["content_preview_returned"])
+            self.assertFalse(group_payload["safety"]["raw_payload_returned"])
             self._assert_no_sensitive(group_payload, root)
 
     def test_daily_generation_status_and_preserve_existing_report(self):
@@ -447,7 +451,7 @@ class WindowsP0BackendTest(unittest.TestCase):
               raw_payload_json, collection_run_id
             )
             values (?, ?, ?, '2026-05-19T09:00:00+08:00',
-                    'text', 'SECRET_BODY', ?, ?, '{}', ?)
+                    'text', '消息正文测试文本', ?, ?, '{}', ?)
             """,
             (
                 session_id,

@@ -92,7 +92,25 @@ READABLE_SESSION_NAME_KEYS = (
     "group_name",
     "room_name",
     "nickName",
+    "nick_name",
     "remarkName",
+    "remark_name",
+)
+SESSION_NAME_METADATA_KEYS = (
+    "contact",
+    "contacts",
+    "chat",
+    "chat_info",
+    "chatroom",
+    "chatroom_info",
+    "conversation",
+    "conversation_info",
+    "metadata",
+    "profile",
+    "room",
+    "room_info",
+    "session",
+    "session_info",
 )
 
 
@@ -157,7 +175,7 @@ def create_app(config: AppConfig):
 
     @app.get("/api/monitor-groups")
     def monitor_groups():
-        return monitor_groups_payload(config)
+        return monitor_groups_payload(config, conn)
 
     @app.get("/api/customer-options")
     def customer_options():
@@ -2555,7 +2573,110 @@ def write_machine_draft(
     return file_path
 
 
-def monitor_groups_payload(config: AppConfig) -> dict[str, Any]:
+def local_group_display_meta_from_payload(payload: Any) -> dict[str, str] | None:
+    payloads: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        payloads.append(payload)
+    elif isinstance(payload, list):
+        payloads.extend([item for item in payload if isinstance(item, dict)])
+    for item in payloads:
+        for source, value in session_probe_name_candidates(item):
+            meta = local_group_display_meta(value, source=f"local_metadata.{source}")
+            if meta["status"] == "resolved":
+                return meta
+    return None
+
+
+def local_group_display_meta_from_db(
+    conn: sqlite3.Connection | None, external_id: str
+) -> dict[str, str] | None:
+    if conn is None or not external_id:
+        return None
+    try:
+        rows = conn.execute(
+            """
+            select display_name
+            from sessions
+            where external_id = ?
+            order by updated_at desc, id desc
+            limit 5
+            """,
+            (external_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    for row in rows:
+        meta = local_group_display_meta(
+            row["display_name"], source="local_session_metadata"
+        )
+        if meta["status"] == "resolved":
+            return meta
+    try:
+        raw_rows = conn.execute(
+            """
+            select rm.raw_payload_json
+            from raw_messages rm
+            join sessions s on s.id = rm.session_id
+            where s.external_id = ?
+            order by rm.id desc
+            limit 20
+            """,
+            (external_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        raw_rows = []
+    for row in raw_rows:
+        try:
+            payload = json.loads(row["raw_payload_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        meta = local_group_display_meta_from_payload(payload)
+        if meta is not None:
+            return meta
+    return None
+
+
+def backfill_monitor_group_display_name_from_local_sources(
+    session: SessionConfig, conn: sqlite3.Connection | None
+) -> bool:
+    current_meta = local_group_display_meta(
+        session.display_name,
+        source=clean_text(getattr(session, "display_name_source", ""))
+        or "config_display_name",
+    )
+    if (
+        current_meta["status"] == "resolved"
+        and clean_text(getattr(session, "display_name_status", "resolved")) != "unresolved"
+    ):
+        return False
+    source_meta = local_group_display_meta_from_db(conn, session.external_id)
+    if source_meta is None:
+        return False
+    session.display_name = source_meta["value"]
+    session.display_name_status = "resolved"
+    session.display_name_source = source_meta["source"]
+    session.display_name_reason_code = ""
+    return True
+
+
+def refresh_monitor_group_display_names_from_local_sources(
+    config: AppConfig, conn: sqlite3.Connection | None
+) -> int:
+    backfilled = 0
+    for session in config.sessions:
+        if backfill_monitor_group_display_name_from_local_sources(session, conn):
+            backfilled += 1
+    if backfilled:
+        write_config_center_yaml(config)
+    return backfilled
+
+
+def monitor_groups_payload(
+    config: AppConfig, conn: sqlite3.Connection | None = None
+) -> dict[str, Any]:
+    backfilled_count = refresh_monitor_group_display_names_from_local_sources(
+        config, conn
+    )
     groups = [monitor_group_public_payload(session) for session in config.sessions]
     customer_data = customer_options_with_source_payload(config)
     customer_options = customer_data["options"]
@@ -2566,6 +2687,8 @@ def monitor_groups_payload(config: AppConfig) -> dict[str, Any]:
         "count": len(groups),
         "active_count": len([group for group in groups if not group["archived"]]),
         "archived_count": len([group for group in groups if group["archived"]]),
+        "display_name_backfilled_count": backfilled_count,
+        "display_name_backfill_status": "updated" if backfilled_count else "not_needed",
         "daily_center_count": len(
             [group for group in groups if group["counts_in_daily_center"]]
         ),
@@ -2703,6 +2826,8 @@ def monitor_group_detail_payload(
     session = find_monitor_group(config, group_id)
     if session is None:
         return {"status": "not_found", "group": {}}
+    if backfill_monitor_group_display_name_from_local_sources(session, conn):
+        write_config_center_yaml(config)
     member_options = monitor_group_member_options(conn, session, config)
     field_options = monitor_group_field_options(config)
     group_meta = local_group_display_meta(session.display_name)
@@ -3642,6 +3767,18 @@ def find_monitor_group(config: AppConfig, group_id: str | None) -> SessionConfig
             for session in config.sessions
             if monitor_group_public_id(session) == group_id
         ),
+        None,
+    )
+
+
+def find_monitor_group_by_external_id(
+    config: AppConfig, external_id: Any
+) -> SessionConfig | None:
+    text = clean_text(external_id)
+    if not text:
+        return None
+    return next(
+        (session for session in config.sessions if clean_text(session.external_id) == text),
         None,
     )
 
@@ -4842,6 +4979,7 @@ def messages_v1_payload(
         session_external = session.external_id
     query = """
         select rm.id, rm.sender_display_name, rm.sender_role, rm.sent_at,
+               rm.message_type, rm.content_text,
                s.external_id, s.display_name, s.customer_name, s.module_name,
                count(cim.item_id) as candidate_count
         from raw_messages rm
@@ -4854,6 +4992,7 @@ def messages_v1_payload(
         params = (session_external,)
     query += """
         group by rm.id, rm.sender_display_name, rm.sender_role, rm.sent_at,
+                 rm.message_type, rm.content_text,
                  s.external_id, s.display_name, s.customer_name, s.module_name
         order by rm.sent_at desc, rm.id desc
         limit 100
@@ -4866,14 +5005,22 @@ def messages_v1_payload(
     for row in rows:
         row_group_id = f"mg-{hashlib.sha256(str(row['external_id']).encode('utf-8')).hexdigest()[:12]}"
         ref = f"m-{int(row['id']):04d}"
-        group_meta = local_group_display_meta(row["display_name"], source="message_session")
+        config_session = find_monitor_group_by_external_id(config, row["external_id"])
+        display_source = (
+            config_session.display_name if config_session is not None else row["display_name"]
+        )
+        group_meta = local_group_display_meta(display_source, source="message_session")
         group_name = group_meta["value"]
         customer_label = local_ui_display_text(row["customer_name"] or "未标客户")
         module_label = local_ui_display_text(row["module_name"] or "未标模块")
+        content_text = local_message_text(row["content_text"])
+        content_preview = local_message_preview(content_text)
+        content_status = "ok" if content_preview else "empty"
         messages.append(
             {
                 "message_ref": ref,
                 "sent_at": str(row["sent_at"] or ""),
+                "message_type": local_ui_display_text(row["message_type"] or "text"),
                 "group_id": row_group_id,
                 "group_name": group_name,
                 "group_name_safe": redact_visible_text(group_name),
@@ -4888,6 +5035,15 @@ def messages_v1_payload(
                 "sender_identity": safe_sender_role(row["sender_role"]),
                 "sender_identity_label": identity_label(row["sender_role"]),
                 "candidate_count": int(row["candidate_count"] or 0),
+                "content_text": content_text,
+                "content_preview": content_preview,
+                "message_text": content_text,
+                "summary": content_preview,
+                "content_text_safe": redact_visible_text(content_text),
+                "content_preview_safe": redact_visible_text(content_preview),
+                "summary_safe": redact_visible_text(content_preview),
+                "content_status": content_status,
+                "content_returned": bool(content_preview),
                 "detail_target": {"group_id": row_group_id, "message_ref": ref},
             }
         )
@@ -4915,8 +5071,11 @@ def messages_v1_payload(
         "groups": groups,
         "messages": messages,
         "safety": {
-            "content_returned": False,
+            "content_returned": True,
+            "content_preview_returned": True,
             "raw_payload_returned": False,
+            "local_ui_payload": True,
+            "report_safe_payload": False,
             "default_real_read_enabled": bool(config.wx_cli.real_read_enabled),
         },
     }
@@ -4925,6 +5084,7 @@ def messages_v1_payload(
 def message_group_options(
     config: AppConfig, conn: sqlite3.Connection
 ) -> list[dict[str, Any]]:
+    refresh_monitor_group_display_names_from_local_sources(config, conn)
     counts: dict[str, int] = {}
     try:
         rows = conn.execute(
@@ -6071,6 +6231,41 @@ def session_probe_has_text(item: dict[str, Any], *keys: str) -> bool:
     return any(bool(clean_text(item.get(key))) for key in keys)
 
 
+def session_probe_name_candidates(
+    item: dict[str, Any], *, max_depth: int = 3
+) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+
+    def add_candidate(path: str, value: Any) -> None:
+        text = clean_text(value)
+        if text:
+            candidates.append((path, text))
+
+    for key in READABLE_SESSION_NAME_KEYS:
+        add_candidate(key, item.get(key))
+
+    def walk(value: Any, path: str, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                if key in READABLE_SESSION_NAME_KEYS:
+                    add_candidate(child_path, child)
+                if isinstance(child, (dict, list)):
+                    walk(child, child_path, depth + 1)
+        elif isinstance(value, list):
+            for index, child in enumerate(value[:8]):
+                if isinstance(child, (dict, list)):
+                    walk(child, f"{path}[{index}]", depth + 1)
+
+    for key in SESSION_NAME_METADATA_KEYS:
+        child = item.get(key)
+        if isinstance(child, (dict, list)):
+            walk(child, key, 1)
+    return candidates
+
+
 def is_detected_wechat_group_session(item: dict[str, Any]) -> bool:
     type_text = session_probe_type_text(item)
     type_tokens = session_probe_type_tokens(item)
@@ -6147,8 +6342,7 @@ def detected_group_identifier(item: dict[str, Any], index: int) -> str:
 
 
 def detected_group_readable_display_name(item: dict[str, Any]) -> tuple[str, str]:
-    for key in READABLE_SESSION_NAME_KEYS:
-        value = clean_text(item.get(key))
+    for key, value in session_probe_name_candidates(item):
         if value and not is_internal_identifier_for_display(value):
             return value, key
     return "", ""
@@ -7302,6 +7496,17 @@ def local_ui_display_text(value: Any) -> str:
 
 def local_ui_display_list(values: list[Any]) -> list[str]:
     return unique_clean_text([local_ui_display_text(value) for value in values])
+
+
+def local_message_text(value: Any) -> str:
+    return clean_text(value)
+
+
+def local_message_preview(value: Any, *, max_chars: int = 180) -> str:
+    text = re.sub(r"\s+", " ", local_message_text(value)).strip()
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars].rstrip()}..."
 
 
 def is_internal_identifier_for_display(value: Any) -> bool:

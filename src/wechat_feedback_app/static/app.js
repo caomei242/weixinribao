@@ -1178,6 +1178,30 @@ function messageGroupId(message) {
   return message?.group_id || messageGroupLabel(message) || "";
 }
 
+function messageReadablePreview(message = {}) {
+  const candidates = [
+    message.content_text,
+    message.content_preview,
+    message.message_text,
+    message.message_preview,
+    message.text_preview,
+    message.preview,
+    message.summary,
+  ];
+  const text = candidates.map((value) => String(value || "").trim()).find(Boolean);
+  return text || "";
+}
+
+function messagePreviewLine(message = {}) {
+  const text = messageReadablePreview(message);
+  if (text) return `正文预览：${text}`;
+  const status = message.content_status || message.preview_status || message.message_status || "";
+  if (status === "not_collected" || status === "empty" || status === "hidden_for_safety") {
+    return "正文预览：未抓到正文；请确认本机已授权真实读取并完成入库。";
+  }
+  return "正文预览：未抓到正文；不会用消息编号冒充摘要。";
+}
+
 function messageGroupOptions() {
   if ((state.messageGroupsV1 || []).length) {
     return state.messageGroupsV1.map((group) => ({
@@ -1267,7 +1291,7 @@ function renderRealTrialMessages(data) {
   container.innerHTML = visibleMessages.map((message) => `
     <article class="message-row">
       <strong>${escapeHtml(message.sent_at || "")}｜${escapeHtml(messageGroupLabel(message) || "未标注群")}｜${escapeHtml(message.sender_display_name || "发送人已脱敏")}｜${escapeHtml(message.sender_identity_label || identityLabel(message.sender_identity))}</strong>
-      <span>消息摘要：${escapeHtml(message.message_ref || "已脱敏")}｜候选关联 ${escapeHtml(message.candidate_count ?? 0)} 条</span>
+      <span>${escapeHtml(messagePreviewLine(message))}｜候选关联 ${escapeHtml(message.candidate_count ?? 0)} 条</span>
       <small>客户：${escapeHtml(message.customer_label || "未标客户")}｜模块：${escapeHtml(message.module_label || "未标模块")}｜详情定位：${escapeHtml(message.detail_target?.message_ref || message.message_ref || "无")}</small>
     </article>
   `).join("");

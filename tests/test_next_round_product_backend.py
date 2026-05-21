@@ -246,7 +246,7 @@ class NextRoundProductBackendTest(unittest.TestCase):
               raw_payload_json, collection_run_id
             )
             values (?, ?, ?, '2026-05-20T09:00:00+08:00',
-                    'text', 'SECRET_BODY', ?, ?, '{}', ?)
+                    'text', '消息正文测试文本', ?, ?, '{}', ?)
             """,
             (
                 session_id,

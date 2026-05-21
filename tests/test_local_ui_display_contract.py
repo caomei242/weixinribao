@@ -85,9 +85,24 @@ class LocalUiDisplayContractTest(unittest.TestCase):
             self.assertTrue(message["group_name"] == raw_group_name)
             self.assertTrue(message["customer_label"] == "客户 13812345678")
             self.assertTrue(message["module_label"] == "模块 13812345678")
+            self.assertTrue(message["content_text"] == "消息正文 13812345678")
+            self.assertTrue(message["content_preview"] == "消息正文 13812345678")
+            self.assertTrue(message["message_text"] == "消息正文 13812345678")
+            self.assertTrue(message["summary"] == "消息正文 13812345678")
+            self.assertNotEqual(message["message_ref"], message["summary"])
             self.assertIn("[敏感信息已脱敏]", groups[1]["group_name_safe"])
             self.assertIn("[敏感信息已脱敏]", message["customer_label_safe"])
-            self.assertFalse(payload["safety"]["content_returned"])
+            self.assertIn("[敏感信息已脱敏]", message["content_preview_safe"])
+            self.assertTrue(payload["safety"]["content_returned"])
+            self.assertTrue(payload["safety"]["content_preview_returned"])
+            self.assertFalse(payload["safety"]["raw_payload_returned"])
+            self.assertTrue(payload["safety"]["local_ui_payload"])
+            self.assertFalse(payload["safety"]["report_safe_payload"])
+
+            report_payload = config_center_payload(config)
+            report_text = json.dumps(report_payload, ensure_ascii=False)
+            self.assertNotIn("消息正文 13812345678", report_text)
+            self.assert_no_forbidden_report_fields(report_payload)
 
     def test_internal_chatroom_id_is_not_used_as_group_display_across_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,6 +143,48 @@ class LocalUiDisplayContractTest(unittest.TestCase):
                 ensure_ascii=False,
             )
             self.assertNotIn(internal_group_id, visible_payload)
+
+    def test_unresolved_group_name_backfills_from_local_message_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, conn = self._setup(
+                root,
+                sessions=[
+                    SessionConfig(
+                        "group-a",
+                        "群名待解析",
+                        display_name_status="unresolved",
+                        display_name_source="session_probe",
+                        display_name_reason_code="internal_identifier_only",
+                    )
+                ],
+            )
+            self._insert_raw_message(
+                conn,
+                "group-a",
+                "123456789012345@chatroom",
+                raw_payload={
+                    "chatroom": {
+                        "display_name": "本地元数据可读群 13812345678"
+                    }
+                },
+            )
+
+            payload = monitor_groups_payload(config, conn)
+            detail = monitor_group_detail_payload(
+                config, payload["groups"][0]["group_id"], conn
+            )
+            groups = message_group_options(config, conn)
+
+            self.assertEqual(
+                payload["groups"][0]["group_name"], "本地元数据可读群 13812345678"
+            )
+            self.assertEqual(payload["groups"][0]["display_name_status"], "resolved")
+            self.assertEqual(payload["display_name_backfilled_count"], 1)
+            self.assertEqual(detail["group"]["group_name"], "本地元数据可读群 13812345678")
+            self.assertEqual(groups[1]["group_name"], "本地元数据可读群 13812345678")
+            self.assertEqual(config.sessions[0].display_name_status, "resolved")
+            self.assertEqual(config.sessions[0].display_name, "本地元数据可读群 13812345678")
 
     def test_internal_people_main_fields_keep_display_values_with_safe_copies(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -275,7 +332,11 @@ class LocalUiDisplayContractTest(unittest.TestCase):
         return config, conn
 
     def _insert_raw_message(
-        self, conn: sqlite3.Connection, external_id: str, group_name: str
+        self,
+        conn: sqlite3.Connection,
+        external_id: str,
+        group_name: str,
+        raw_payload: dict[str, object] | None = None,
     ) -> None:
         cursor = conn.execute(
             "insert into sessions (external_id, display_name, customer_name, module_name) values (?, ?, ?, ?)",
@@ -297,9 +358,13 @@ class LocalUiDisplayContractTest(unittest.TestCase):
               raw_payload_json, collection_run_id
             )
             values (?, '发送人', 'customer', '2026-05-20T09:02:00+08:00',
-                    'text', 'SECRET_BODY', 'hash-a', 'dedupe-a', '{}', ?)
+                    'text', '消息正文 13812345678', 'hash-a', 'dedupe-a', ?, ?)
             """,
-            (session_id, int(run.lastrowid)),
+            (
+                session_id,
+                json.dumps(raw_payload or {}, ensure_ascii=False),
+                int(run.lastrowid),
+            ),
         )
         conn.commit()
 
