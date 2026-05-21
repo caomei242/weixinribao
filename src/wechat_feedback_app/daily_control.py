@@ -209,6 +209,24 @@ def load_daily_candidate_summaries(
                ci.title, ci.summary, ci.suggested_downstream, ci.first_seen_at,
                ci.last_seen_at,
                (
+                 select s.external_id
+                 from candidate_item_messages cim
+                 join raw_messages rm on rm.id = cim.raw_message_id
+                 join sessions s on s.id = rm.session_id
+                 where cim.item_id = ci.id
+                 order by cim.evidence_order, rm.sent_at, rm.id
+                 limit 1
+               ) as session_external_id,
+               (
+                 select s.display_name
+                 from candidate_item_messages cim
+                 join raw_messages rm on rm.id = cim.raw_message_id
+                 join sessions s on s.id = rm.session_id
+                 where cim.item_id = ci.id
+                 order by cim.evidence_order, rm.sent_at, rm.id
+                 limit 1
+               ) as session_display_name,
+               (
                  select mr.owner_name from manual_reviews mr
                  where mr.item_id = ci.id
                  order by mr.reviewed_at desc, mr.id desc

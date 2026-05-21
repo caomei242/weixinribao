@@ -1090,7 +1090,25 @@ def historical_unfollowed_items(
         """
         select id, item_code, item_type, status, risk_level, risk_tags_json,
                customer_name, channel_name, module_name, title, summary,
-               suggested_downstream, first_seen_at, last_seen_at
+               suggested_downstream, first_seen_at, last_seen_at,
+               (
+                 select s.external_id
+                 from candidate_item_messages cim
+                 join raw_messages rm on rm.id = cim.raw_message_id
+                 join sessions s on s.id = rm.session_id
+                 where cim.item_id = candidate_items.id
+                 order by cim.evidence_order, rm.sent_at, rm.id
+                 limit 1
+               ) as session_external_id,
+               (
+                 select s.display_name
+                 from candidate_item_messages cim
+                 join raw_messages rm on rm.id = cim.raw_message_id
+                 join sessions s on s.id = rm.session_id
+                 where cim.item_id = candidate_items.id
+                 order by cim.evidence_order, rm.sent_at, rm.id
+                 limit 1
+               ) as session_display_name
         from candidate_items
         where date(first_seen_at) < date(?)
           and status in ('pending', 'confirmed')
@@ -3178,8 +3196,14 @@ def save_monitor_group_payload(
     session = find_monitor_group(config, group_id) if group_id else None
     if group_id and session is None:
         return {"status": "not_found", "group": {}}
-    group_name = clean_text(payload.get("group_name")) or clean_text(
-        payload.get("display_name")
+    group_name = (
+        clean_text(payload.get("group_name"))
+        or clean_text(payload.get("display_name"))
+        or clean_text(payload.get("manual_display_name"))
+        or clean_text(payload.get("local_display_name"))
+        or clean_text(payload.get("local_alias"))
+        or clean_text(payload.get("display_alias"))
+        or clean_text(payload.get("alias"))
     )
     if not group_name:
         return {
@@ -3258,6 +3282,7 @@ def save_monitor_group_payload(
         )
         initial_roster_sync = roster_sync_result_summary(initial_roster_sync_result)
     member_options = monitor_group_member_options(conn, session, config)
+    label_counts = monitor_group_display_name_diagnostic(config, conn)
     result = {
         "status": "saved",
         "group": monitor_group_public_payload(
@@ -3267,6 +3292,17 @@ def save_monitor_group_payload(
         "member_name_options": member_options["names"],
         "customer_suggestion": customer_suggestion,
         "customer_options_count": len(customer_options),
+        "manual_display_name_saved": group_meta["status"] == "resolved",
+        "display_name_readback_status": session.display_name_status,
+        "display_name_readback_source": session.display_name_source,
+        "readable_group_label_count": label_counts["readable_group_label_count"],
+        "unresolved_group_label_count": label_counts["unresolved_group_label_count"],
+        "readback_contract": {
+            "list_field": "group_name",
+            "detail_field": "group.group_name",
+            "message_group_field": "group_name",
+            "candidate_daily_field": "group_label",
+        },
         "real_read_enabled": False,
         "save_triggers_collection": False,
     }

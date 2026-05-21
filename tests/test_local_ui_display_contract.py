@@ -10,7 +10,9 @@ from wechat_feedback_app.config import AppConfig, PersonConfig, SessionConfig
 from wechat_feedback_app.db import connect, init_db
 from wechat_feedback_app.routes import (
     build_candidate_inbox_items,
+    candidate_inbox_payload,
     config_center_payload,
+    daily_center_payload,
     daily_center_today_focus_payload,
     daily_followup_items_payload,
     detected_group_external_id_from_raw,
@@ -21,6 +23,7 @@ from wechat_feedback_app.routes import (
     monitor_group_detail_payload,
     monitor_groups_payload,
     real_trial_latest_items_payload,
+    save_monitor_group_payload,
 )
 
 
@@ -328,6 +331,100 @@ class LocalUiDisplayContractTest(unittest.TestCase):
             self.assertEqual(len(resolved), 2)
             self.assertEqual(len(unresolved), 1)
 
+    def test_manual_group_display_name_saves_and_reads_back_across_local_ui_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, conn = self._setup(
+                root,
+                sessions=[
+                    SessionConfig(
+                        "group-a",
+                        "群名待解析",
+                        display_name_status="unresolved",
+                        display_name_reason_code="internal_identifier_only",
+                    ),
+                    SessionConfig(
+                        "group-b",
+                        "群名待解析",
+                        display_name_status="unresolved",
+                        display_name_reason_code="internal_identifier_only",
+                    ),
+                ],
+            )
+            raw_message_id = self._insert_raw_message(
+                conn,
+                "group-a",
+                "123456789012345@chatroom",
+            )
+            self._insert_candidate_for_raw_message(conn, raw_message_id)
+            before = monitor_groups_payload(config, conn)
+            first_group_id = before["groups"][0]["group_id"]
+
+            saved = save_monitor_group_payload(
+                config,
+                {"manual_display_name": "人工命名群 13812345678"},
+                first_group_id,
+                conn,
+            )
+            after = monitor_groups_payload(config, conn)
+            detail = monitor_group_detail_payload(config, first_group_id, conn)
+            groups = message_group_options(config, conn)
+            inbox = candidate_inbox_payload(config, conn, "2026-05-20")
+            center = daily_center_payload(config, conn, "2026-05-20")
+            direct_item = {
+                "id": 1,
+                "item_code": "UI-001",
+                "item_type": "bug",
+                "status": "pending",
+                "risk_level": "none",
+                "risk_tags": [],
+                "title": "标题 13812345678",
+                "summary": "摘要 13812345678",
+                "group_name": "123456789012345@chatroom",
+                "session_external_id": "group-a",
+            }
+            followup = daily_followup_items_payload(
+                [direct_item], set(), "today_top_followups", config
+            )[0]
+            focus = daily_center_today_focus_payload(
+                "2026-05-20",
+                [direct_item],
+                [],
+                1,
+                {},
+                False,
+                config,
+            )["items"][0]
+            inbox_item = build_candidate_inbox_items(
+                [direct_item], "workspace", set(), config
+            )[0]
+
+            self.assertEqual(before["readable_group_label_count"], 0)
+            self.assertEqual(before["unresolved_group_label_count"], 2)
+            self.assertEqual(saved["status"], "saved")
+            self.assertTrue(saved["manual_display_name_saved"])
+            self.assertEqual(saved["display_name_readback_status"], "resolved")
+            self.assertEqual(saved["readable_group_label_count"], 1)
+            self.assertEqual(saved["unresolved_group_label_count"], 1)
+            self.assertEqual(after["readable_group_label_count"], 1)
+            self.assertEqual(after["unresolved_group_label_count"], 1)
+            self.assertEqual(after["groups"][0]["group_name"], "人工命名群 13812345678")
+            self.assertEqual(after["groups"][0]["display_name_status"], "resolved")
+            self.assertEqual(detail["group"]["group_name"], "人工命名群 13812345678")
+            self.assertEqual(groups[1]["group_name"], "人工命名群 13812345678")
+            self.assertEqual(inbox["items"][0]["group_label"], "人工命名群 13812345678")
+            self.assertEqual(
+                center["today_focus"]["items"][0]["group_label"],
+                "人工命名群 13812345678",
+            )
+            for row in (followup, focus, inbox_item):
+                self.assertEqual(row["group_label"], "人工命名群 13812345678")
+                self.assertEqual(row["group_label_status"], "resolved")
+                self.assertIn("[敏感信息已脱敏]", row["group_label_safe"])
+            self.assertEqual(config.sessions[1].display_name, "群名待解析")
+            self.assertEqual(config.sessions[1].display_name_status, "unresolved")
+            self.assert_no_forbidden_report_fields(config_center_payload(config, conn))
+
     def test_internal_people_main_fields_keep_display_values_with_safe_copies(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -481,7 +578,7 @@ class LocalUiDisplayContractTest(unittest.TestCase):
         raw_payload: dict[str, object] | None = None,
         message_type: str = "text",
         content_text: str = "消息正文 13812345678",
-    ) -> None:
+    ) -> int:
         cursor = conn.execute(
             "insert into sessions (external_id, display_name, customer_name, module_name) values (?, ?, ?, ?)",
             (external_id, group_name, "客户 13812345678", "模块 13812345678"),
@@ -494,7 +591,7 @@ class LocalUiDisplayContractTest(unittest.TestCase):
                     '2026-05-20T09:01:00+08:00', 'success')
             """
         )
-        conn.execute(
+        raw = conn.execute(
             """
             insert into raw_messages (
               session_id, sender_display_name, sender_role, sent_at,
@@ -511,6 +608,34 @@ class LocalUiDisplayContractTest(unittest.TestCase):
                 json.dumps(raw_payload or {}, ensure_ascii=False),
                 int(run.lastrowid),
             ),
+        )
+        conn.commit()
+        return int(raw.lastrowid)
+
+    def _insert_candidate_for_raw_message(self, conn: sqlite3.Connection, raw_message_id: int) -> None:
+        cursor = conn.execute(
+            """
+            insert into candidate_items (
+              item_code, item_type, status, risk_level, risk_tags_json,
+              customer_name, channel_name, module_name, title, summary,
+              suggested_downstream, aggregate_key, first_seen_at, last_seen_at
+            )
+            values (
+              'UI-001', 'bug', 'pending', 'none', '[]',
+              '客户 13812345678', '', '模块 13812345678',
+              '标题 13812345678', '摘要 13812345678',
+              'tech', 'manual-group-label-test',
+              '2026-05-20T09:05:00+08:00', '2026-05-20T09:05:00+08:00'
+            )
+            """
+        )
+        item_id = int(cursor.lastrowid)
+        conn.execute(
+            """
+            insert into candidate_item_messages (item_id, raw_message_id, evidence_order)
+            values (?, ?, 1)
+            """,
+            (item_id, raw_message_id),
         )
         conn.commit()
 

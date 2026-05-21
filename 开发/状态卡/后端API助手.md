@@ -1,6 +1,6 @@
 # 微信agent专项 后端/API 助手状态卡
 
-更新时间：2026-05-21 12:14 CST
+更新时间：2026-05-21 12:33 CST
 
 ## 线程身份
 
@@ -12,52 +12,46 @@
 
 ## 本轮任务
 
-- 任务标记：`2026-05-21｜后端API｜persistent all_wechat_groups history target 修复`
+- 任务标记：`2026-05-21｜后端API｜群名人工命名保存读回确认/补契约`
 - 状态：完成 / 待监工验收
-- 结论：已按最小稳定方案修复 all_wechat_groups 的 history target。保留 `detected-wechat-group-*` 作为本地配置 / 展示 / 关联键，同时新增本地执行专用 `history_target / wx_session_token / source_session_id`，wx history 调用优先使用底层 wx session token，不再把 detected hash 传给 wx-cli。
+- 结论：现有后端已支持 `group_name/display_name` 保存并在列表、详情、消息筛选读回；本轮补齐人工命名别名字段和候选/日报关联 label 读回，确保 6 个 `unresolved_without_readable_source` 群人工填写本地显示名后可升级为 resolved，并降低 unresolved count。
 
-## 最小方案选择
+## 插队记录
 
-- 选择：新增 `history_target`，不直接把 `external_id` 改成真实 token。
-- 原因：保留既有 detected hash 作为本地去重 / 关联键，迁移风险更小；同时真实执行链路用底层 token 跑通 wx history。
-- 配置保存：本地 `config/app.yaml` 可保存执行专用 target；`/api/config-center`、状态卡、回报队列和 smoke 不返回 token 明细。
+- 被插队任务：`2026-05-21｜后端API｜真实首跑入库候选 0 最小补证`
+- 当前处理：已暂停；该任务只做了只读判断和状态记录，未改业务代码。后续可继续补 raw/candidate 0 的安全 summary 字段。
 
 ## 改动文件
 
-- `/Users/gd/Desktop/微信agent专项/src/wechat_feedback_app/config.py`
 - `/Users/gd/Desktop/微信agent专项/src/wechat_feedback_app/routes.py`
-- `/Users/gd/Desktop/微信agent专项/tests/test_persistent_real_read_contract.py`
+- `/Users/gd/Desktop/微信agent专项/src/wechat_feedback_app/daily_control.py`
+- `/Users/gd/Desktop/微信agent专项/tests/test_local_ui_display_contract.py`
 - `/Users/gd/Desktop/微信agent专项/开发/状态卡/后端API助手.md`
 - `/Users/gd/Desktop/微信agent专项/开发/监工回报队列.md`
 
-说明：工作区仍有前台/UI和调度材料未提交改动，本线程未回滚、未覆盖；本 P0 业务补丁只收口后端/API target 合同和测试。
+说明：工作区仍有前台/UI和调度材料未提交改动，本线程未回滚、未覆盖；本 P0 业务补丁只收口后端/API 人工命名契约和测试。
 
-## history target 合同
+## 保存 / 读回契约
 
-- all_wechat_groups 探针从 `id / external_id / username / room_id / chat_id / conversation_id / session_id` 等字段提取底层 wx history target。
-- `SessionConfig` 新增本地执行字段：`history_target`、`wx_session_token`、`source_session_id`。
-- wx history target 选择顺序：`history_target` / `wx_session_token` / `source_session_id` > resolved 可读 display name > external_id。
-- 若最终 target 仍是 `detected-wechat-group-*` / `local-monitor-*` 这类本地 hash，则不调用 wx history，直接计入 `session_identifier_mismatch`，并返回 `invalid_history_target_count`。
-- `upsert_detected_monitor_groups` 会为已存在 detected 群补齐缺失的 target；同 external_id 后续可升级，旧白名单模式不回退。
+- 保存接口继续支持前台已发送的 `group_name/display_name`。
+- 新增兼容别名：`manual_display_name`、`local_display_name`、`local_alias`、`display_alias`、`alias`。
+- 保存人工名后，`display_name_status=resolved`，`display_name_source=user_input`，人工名作为本地 UI 主 label。
+- 保存响应新增 count/readback 摘要：`manual_display_name_saved`、`display_name_readback_status`、`display_name_readback_source`、`readable_group_label_count`、`unresolved_group_label_count`、`readback_contract`。
+- 不同 unresolved 群不按占位名误合并；只更新指定 `group_id` 对应会话。
 
-## failure classification 保留
+## 读回覆盖
 
-- 保留上一棒分类字段：`history_failure_classification`、`history_failure_category_counts`、`history_failure_categories`、`details_returned=false`。
-- 仍不透传 raw stdout/stderr、命令明细、真实 token、群名、正文、路径或 daemon 原文。
+- `/api/monitor-groups` 列表：`group_name/display_name` 返回人工名，readable count 增加，unresolved count 降低。
+- `/api/monitor-groups/{group_id}` 详情：`group.group_name` 返回人工名。
+- `/api/messages/v1` 群筛选：`message_group_options[].group_name` 返回人工名。
+- 候选 / 日报：`candidate_inbox`、`daily_center.today_focus`、`daily_followup_items_payload`、`daily_center_today_focus_payload`、`build_candidate_inbox_items` 可从候选证据链的 session id 映射到 config 中的人工名，返回 `group_label`。
 
 ## 测试 / 证据
 
-- persistent 专项：`python exit=0 log=.codex_py_logs/py-run-20260521-121331.log`，25 passed。
-- 相关后端专项：`python exit=0 log=.codex_py_logs/py-run-20260521-121338.log`，116 passed。
-- 全量 pytest：`python exit=0 log=.codex_py_logs/py-run-20260521-121346.log`，157 passed。
+- 本地 UI 合同专项：`python exit=0 log=.codex_py_logs/py-run-20260521-123305.log`，12 passed。
+- 相关后端专项：`python exit=0 log=.codex_py_logs/py-run-20260521-123312.log`，117 passed。
+- 全量 pytest：`python exit=0 log=.codex_py_logs/py-run-20260521-123321.log`，158 passed。
 - `git diff --check`：exit=0。
-
-## 验收覆盖
-
-- fake wx sessions 只有底层 token、无可读名时，persistent all_wechat_groups 调 history 使用底层 token，不使用 detected hash。
-- 本地 config/session 仍保留 detected external_id 作为关联键，并持有本地执行 target。
-- target 仍是 detected hash 时，不调用 wx history，直接安全分类为 `session_identifier_mismatch`，并计入 `invalid_history_target_count`。
-- all_wechat_groups 旧探针、非群过滤、英文 room/group 误判防线、persistent 默认关闭、字段白名单不回退。
 
 ## 字段白名单 / 安全边界
 
@@ -67,17 +61,23 @@
 - 未自动外发 / 自动回复。
 - 未写正式日报、正式待办池、Obsidian 正式区或外部系统。
 - `real_read_enabled=false` 事后保持。
-- 本地配置可保存执行 target；状态卡、回报队列、测试日志和最终回复不摘录真实 token、真实群名、真实消息正文、真实会话、成员名单、客户名单、wxid/key/salt、DB path、IP、daemon 原始日志。
+- 状态卡、回报队列、测试日志和最终回复不摘录真实 token、真实群名、真实消息正文、真实会话、成员名单、客户名单、wxid/key/salt、DB path、IP、daemon 原始日志。
+
+## Windows smoke 建议回传字段
+
+- 保存前后：`readable_group_label_count`、`unresolved_group_label_count`、目标项 `display_name_status`、`group_name_status`。
+- 读回路径：列表 / 详情 / 消息筛选 / 候选或日报 label 是否均为 resolved。
+- 只回 count/status/布尔，不回传真实人工名。
 
 ## 剩余风险
 
-- 本轮未在 Windows 执行真实读取；需要发布到 Windows 后复跑 persistent all_wechat_groups。
-- 若仍失败，预期 failure category 不应再是 `session_identifier_mismatch`；需要按返回分类继续定位 wx-cli 参数、权限/DB/连接或窗口问题。
+- 本轮未在 Windows 运行态保存真实 6 个群；需要发布后由 Windows 页面保存其中一个 unresolved 群并回传 count/status。
+- 若前台保存 payload 未带 `group_id` 或运行态仍是旧后端，会导致未命中指定群；需同步确认发布来源和请求路径。
 
 ## 下一棒建议
 
-- 发布到 Windows 后复跑 all_wechat_groups / persistent / 30 天真实首跑，只回传 sessions_success/raw_messages_seen/raw_messages_inserted/candidate_items_created/failure_category/count。
-- 若成功转正，再回接被插队的 6 个 unresolved 群名人工命名入口。
+- Windows 发布后先对 1 个 unresolved 群保存人工名，回传 count/status/布尔；通过后批量处理剩余 unresolved 群。
+- 本 P0 收口后，回接 `真实首跑入库候选 0 最小补证`，解释 raw inserted/candidate created 为 0 的原因。
 
 ## 回报投递
 

@@ -3025,8 +3025,14 @@ function renderMonitorGroupEditor() {
     `${group.verification_status || "待验证"}｜${monitorStatusText}｜试读成功前不会自动纳入日报统计`;
   document.querySelector("#monitorGroupCompleteness").textContent = completeness.label;
   const displayNameInput = document.querySelector("#monitorGroupDisplayName");
+  const displayNameHint = document.querySelector("#monitorGroupDisplayNameHint");
   displayNameInput.value = editableGroupName;
   displayNameInput.placeholder = editableGroupName ? "请输入监控群名称" : "待补群名";
+  if (displayNameHint) {
+    displayNameHint.textContent = editableGroupName
+      ? "保存后用于左侧列表、消息筛选和候选 / 日报关联。"
+      : "当前没有可读群名；请在这里手动填写本地显示名，保存后替换“群名待解析”。";
+  }
   renderCustomerSelect(group);
   renderMonitorGroupOptionStatus(group);
   setOptions(document.querySelector("#monitorGroupType"), fieldOptionValues(["group_types", "group_type_options"], monitorGroupOptions.groupTypes, "group_type"), group.group_type);
